@@ -9,6 +9,7 @@ from .deckgym import (
     PyState as State,
     PyGameOutcome as GameOutcome,
     PySimulationResults as SimulationResults,
+    PyRLEnv as RLEnv,
     py_simulate as simulate,
     get_player_types,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "State",
     "GameOutcome",
     "SimulationResults",
+    "RLEnv",
     "simulate",
     "get_player_types",
 ]

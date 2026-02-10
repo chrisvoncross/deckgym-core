@@ -723,6 +723,160 @@ impl PyGame {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// RL Environment — Dedicated class for reinforcement learning integration.
+// Owns State + RNG directly (no player system). Provides:
+//   - get_legal_actions()  → list of (index, action_string) tuples
+//   - apply_action(idx)    → applies action by index, refreshes cache
+//   - clone_env()          → deep clone for MCTS tree search
+//   - get_state()          → current PyState snapshot
+// ═══════════════════════════════════════════════════════════════════════
+
+use rand::rngs::StdRng;
+use rand::SeedableRng;
+
+#[pyclass(unsendable)]
+pub struct PyRLEnv {
+    state: State,
+    rng: StdRng,
+    seed: u64,
+    cached_actions: Vec<crate::actions::Action>,
+    cached_actor: usize,
+}
+
+#[pymethods]
+impl PyRLEnv {
+    /// Create a new RL environment from two deck file paths.
+    #[new]
+    #[pyo3(signature = (deck_a_path, deck_b_path, seed=None))]
+    pub fn new(deck_a_path: &str, deck_b_path: &str, seed: Option<u64>) -> PyResult<Self> {
+        let deck_a = Deck::from_file(deck_a_path).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Failed to load deck A: {}", e))
+        })?;
+        let deck_b = Deck::from_file(deck_b_path).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Failed to load deck B: {}", e))
+        })?;
+
+        let game_seed = seed.unwrap_or_else(rand::random::<u64>);
+        let mut rng = StdRng::seed_from_u64(game_seed);
+        let state = State::initialize(&deck_a, &deck_b, &mut rng);
+        let (actor, actions) = state.generate_possible_actions();
+
+        Ok(PyRLEnv {
+            state,
+            rng,
+            seed: game_seed,
+            cached_actions: actions,
+            cached_actor: actor,
+        })
+    }
+
+    /// Returns (actor, list_of_(index, action_display_string)) for current state.
+    fn get_legal_actions(&self) -> (usize, Vec<(usize, String)>) {
+        let items: Vec<(usize, String)> = self
+            .cached_actions
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (i, format!("{}", a.action)))
+            .collect();
+        (self.cached_actor, items)
+    }
+
+    /// Number of legal actions available in current state.
+    fn num_legal_actions(&self) -> usize {
+        self.cached_actions.len()
+    }
+
+    /// The player who must act (0 or 1).
+    fn get_actor(&self) -> usize {
+        self.cached_actor
+    }
+
+    /// Apply the action at the given index. Refreshes the cached legal actions.
+    fn apply_action(&mut self, action_idx: usize) -> PyResult<()> {
+        if action_idx >= self.cached_actions.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "action_idx {} out of range (0..{})",
+                action_idx,
+                self.cached_actions.len()
+            )));
+        }
+        let action = self.cached_actions[action_idx].clone();
+        crate::actions::apply_action(&mut self.rng, &mut self.state, &action);
+
+        // Refresh cached legal actions
+        if !self.state.is_game_over() {
+            let (actor, actions) = self.state.generate_possible_actions();
+            self.cached_actions = actions;
+            self.cached_actor = actor;
+        } else {
+            self.cached_actions.clear();
+        }
+        Ok(())
+    }
+
+    /// Deep clone for MCTS tree search. Returns a new independent PyRLEnv.
+    fn clone_env(&self) -> Self {
+        PyRLEnv {
+            state: self.state.clone(),
+            rng: self.rng.clone(),
+            seed: self.seed,
+            cached_actions: self.cached_actions.clone(),
+            cached_actor: self.cached_actor,
+        }
+    }
+
+    /// Get a snapshot of the current game state.
+    fn get_state(&self) -> PyState {
+        PyState {
+            state: self.state.clone(),
+        }
+    }
+
+    /// Whether the game has ended.
+    fn is_game_over(&self) -> bool {
+        self.state.is_game_over()
+    }
+
+    /// Returns the winner player index (0 or 1), None if tie or not over.
+    fn get_winner(&self) -> Option<usize> {
+        match self.state.winner {
+            Some(GameOutcome::Win(p)) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Returns the game outcome if game is over.
+    fn get_outcome(&self) -> Option<PyGameOutcome> {
+        self.state.winner.map(|o| o.into())
+    }
+
+    /// Current turn count.
+    fn get_turn_count(&self) -> u8 {
+        self.state.turn_count
+    }
+
+    /// Current player index.
+    fn get_current_player(&self) -> usize {
+        self.state.current_player
+    }
+
+    /// Points for each player [p0, p1].
+    fn get_points(&self) -> [u8; 2] {
+        self.state.points
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PyRLEnv(turn={}, actor={}, actions={}, game_over={})",
+            self.state.turn_count,
+            self.cached_actor,
+            self.cached_actions.len(),
+            self.state.is_game_over()
+        )
+    }
+}
+
 /// Simulation results
 #[pyclass]
 pub struct PySimulationResults {
@@ -853,6 +1007,7 @@ pub fn deckgym(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyState>()?;
     m.add_class::<PyGameOutcome>()?;
     m.add_class::<PySimulationResults>()?;
+    m.add_class::<PyRLEnv>()?;
     m.add_function(wrap_pyfunction!(py_simulate, m)?)?;
     m.add_function(wrap_pyfunction!(get_player_types, m)?)?;
     Ok(())
