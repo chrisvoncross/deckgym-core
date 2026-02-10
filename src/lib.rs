@@ -40,6 +40,8 @@ pub use state::State;
 
 #[cfg(feature = "python")]
 pub mod python_bindings;
+#[cfg(feature = "python")]
+pub mod alphazero_mcts;
 
 #[cfg(feature = "tui")]
 pub mod tui;

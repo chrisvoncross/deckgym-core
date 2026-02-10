@@ -737,11 +737,11 @@ use rand::SeedableRng;
 
 #[pyclass(unsendable)]
 pub struct PyRLEnv {
-    state: State,
-    rng: StdRng,
-    seed: u64,
-    cached_actions: Vec<crate::actions::Action>,
-    cached_actor: usize,
+    pub(crate) state: State,
+    pub(crate) rng: StdRng,
+    pub(crate) seed: u64,
+    pub(crate) cached_actions: Vec<crate::actions::Action>,
+    pub(crate) cached_actor: usize,
 }
 
 #[pymethods]
@@ -1008,6 +1008,8 @@ pub fn deckgym(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGameOutcome>()?;
     m.add_class::<PySimulationResults>()?;
     m.add_class::<PyRLEnv>()?;
+    m.add_class::<crate::alphazero_mcts::PyMCTSConfig>()?;
+    m.add_class::<crate::alphazero_mcts::PyMCTSEngine>()?;
     m.add_function(wrap_pyfunction!(py_simulate, m)?)?;
     m.add_function(wrap_pyfunction!(get_player_types, m)?)?;
     Ok(())

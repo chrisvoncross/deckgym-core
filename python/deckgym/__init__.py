@@ -10,6 +10,8 @@ from .deckgym import (
     PyGameOutcome as GameOutcome,
     PySimulationResults as SimulationResults,
     PyRLEnv as RLEnv,
+    PyMCTSConfig as MCTSConfig,
+    PyMCTSEngine as MCTSEngine,
     py_simulate as simulate,
     get_player_types,
 )
@@ -26,6 +28,8 @@ __all__ = [
     "GameOutcome",
     "SimulationResults",
     "RLEnv",
+    "MCTSConfig",
+    "MCTSEngine",
     "simulate",
     "get_player_types",
 ]
