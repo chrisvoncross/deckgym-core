@@ -1704,18 +1704,28 @@ pub struct PyPPOSelfPlay {
     n_envs: usize,
     deck_files: Vec<String>,
     opp_onnx_path: String,
+    selfplay_ratio: f32,
+    heuristic_ratio: f32,
 }
 
 #[cfg(feature = "onnx")]
 #[pymethods]
 impl PyPPOSelfPlay {
     #[new]
-    #[pyo3(signature = (n_envs, deck_files, opp_onnx_path))]
-    fn new(n_envs: usize, deck_files: Vec<String>, opp_onnx_path: String) -> Self {
+    #[pyo3(signature = (n_envs, deck_files, opp_onnx_path, selfplay_ratio=0.60, heuristic_ratio=0.25))]
+    fn new(
+        n_envs: usize,
+        deck_files: Vec<String>,
+        opp_onnx_path: String,
+        selfplay_ratio: f32,
+        heuristic_ratio: f32,
+    ) -> Self {
         PyPPOSelfPlay {
             n_envs,
             deck_files,
             opp_onnx_path,
+            selfplay_ratio,
+            heuristic_ratio,
         }
     }
 
@@ -1737,6 +1747,8 @@ impl PyPPOSelfPlay {
             self.n_envs,
             self.deck_files.clone(),
             opp_path,
+            self.selfplay_ratio,
+            self.heuristic_ratio,
         )
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
 
