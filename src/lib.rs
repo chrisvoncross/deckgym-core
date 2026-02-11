@@ -42,6 +42,10 @@ pub use state::State;
 pub mod python_bindings;
 #[cfg(feature = "python")]
 pub mod alphazero_mcts;
+#[cfg(feature = "onnx")]
+pub mod onnx_predictor;
+#[cfg(all(feature = "python", feature = "onnx"))]
+pub mod cross_game_mcts;
 
 #[cfg(feature = "tui")]
 pub mod tui;

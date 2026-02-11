@@ -28,12 +28,15 @@ strum_macros = "0.27"
 ratatui = { version = "0.28", optional = true }
 crossterm = { version = "0.28", optional = true }
 rand_distr = "0.4"
+ort = { version = "2.0.0-rc.11", features = ["cuda", "load-dynamic"], optional = true }
+ndarray = { version = "0.17", optional = true }
 
 [features]
 default = []
 python = ["pyo3"]
 tui = ["ratatui", "crossterm"]
 csv-export = ["csv"]
+onnx = ["dep:ort", "dep:ndarray"]
 
 [lib]
 name = "deckgym"

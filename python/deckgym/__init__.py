@@ -33,3 +33,16 @@ __all__ = [
     "simulate",
     "get_player_types",
 ]
+
+# ONNX-dependent classes (only available when built with --features onnx)
+try:
+    from .deckgym import PyOnnxPredictor as OnnxPredictor
+    __all__.append("OnnxPredictor")
+except ImportError:
+    pass
+
+try:
+    from .deckgym import PyCrossGameSelfPlay as CrossGameSelfPlay
+    __all__.append("CrossGameSelfPlay")
+except ImportError:
+    pass

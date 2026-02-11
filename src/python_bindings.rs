@@ -1010,6 +1010,10 @@ pub fn deckgym(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRLEnv>()?;
     m.add_class::<crate::alphazero_mcts::PyMCTSConfig>()?;
     m.add_class::<crate::alphazero_mcts::PyMCTSEngine>()?;
+    #[cfg(feature = "onnx")]
+    m.add_class::<crate::alphazero_mcts::PyOnnxPredictor>()?;
+    #[cfg(feature = "onnx")]
+    m.add_class::<crate::alphazero_mcts::PyCrossGameSelfPlay>()?;
     m.add_function(wrap_pyfunction!(py_simulate, m)?)?;
     m.add_function(wrap_pyfunction!(get_player_types, m)?)?;
     Ok(())
