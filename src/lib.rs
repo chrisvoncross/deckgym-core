@@ -46,6 +46,8 @@ pub mod alphazero_mcts;
 pub mod onnx_predictor;
 #[cfg(all(feature = "python", feature = "onnx"))]
 pub mod cross_game_mcts;
+#[cfg(all(feature = "python", feature = "onnx"))]
+pub mod ppo_selfplay;
 
 #[cfg(feature = "tui")]
 pub mod tui;

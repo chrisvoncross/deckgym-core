@@ -1681,3 +1681,124 @@ impl PyCrossGameSelfPlay {
         )
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// PyPPOSelfPlay — Rust-side PPO self-play with callback for GPU inference
+// ═══════════════════════════════════════════════════════════════════════
+
+/// PPO self-play loop entirely in Rust.
+///
+/// Eliminates Python env overhead by managing all game logic in Rust.
+/// Only the agent's NN inference crosses the Rust/Python boundary.
+/// Opponent inference uses ONNX in Rust (zero Python overhead).
+///
+/// ```python
+/// from deckgym import PPOSelfPlay
+/// sp = PPOSelfPlay(n_envs=64, deck_files=["deck1.txt", "deck2.txt"],
+///                  opp_onnx_path="opponent.onnx")
+/// trajectories = sp.run(num_games=256, predict_fn=my_gpu_predict)
+/// ```
+#[cfg(feature = "onnx")]
+#[pyclass]
+pub struct PyPPOSelfPlay {
+    n_envs: usize,
+    deck_files: Vec<String>,
+    opp_onnx_path: String,
+}
+
+#[cfg(feature = "onnx")]
+#[pymethods]
+impl PyPPOSelfPlay {
+    #[new]
+    #[pyo3(signature = (n_envs, deck_files, opp_onnx_path))]
+    fn new(n_envs: usize, deck_files: Vec<String>, opp_onnx_path: String) -> Self {
+        PyPPOSelfPlay {
+            n_envs,
+            deck_files,
+            opp_onnx_path,
+        }
+    }
+
+    /// Run PPO self-play for num_games, using predict_fn for agent inference.
+    ///
+    /// predict_fn(obs_flat: list[float], mask_flat: list[float], batch_size: int)
+    ///   -> (actions: list[int], log_probs: list[float], values: list[float])
+    ///
+    /// Returns list of trajectory dicts, one per completed game.
+    #[pyo3(signature = (num_games, predict_fn))]
+    fn run(
+        &self,
+        py: Python<'_>,
+        num_games: usize,
+        predict_fn: &Bound<'_, pyo3::types::PyAny>,
+    ) -> PyResult<Vec<PyObject>> {
+        let opp_path = std::path::Path::new(&self.opp_onnx_path);
+        let mut selfplay = crate::ppo_selfplay::PPOSelfPlay::new(
+            self.n_envs,
+            self.deck_files.clone(),
+            opp_path,
+        )
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+        // Wrap Python predict_fn as a Rust closure
+        // We need to acquire the GIL for each predict call
+        let predict_fn_ref = predict_fn.to_object(py);
+        let trajectories = selfplay.run_batch(num_games, |obs_flat, mask_flat, batch_size| {
+            // Acquire GIL for Python callback
+            Python::with_gil(|py| {
+                let obs_list = pyo3::types::PyList::new_bound(py, obs_flat);
+                let mask_list = pyo3::types::PyList::new_bound(py, mask_flat);
+                let result = predict_fn_ref
+                    .call1(py, (obs_list, mask_list, batch_size))
+                    .expect("predict_fn failed");
+
+                let tuple = result.downcast_bound::<pyo3::types::PyTuple>(py)
+                    .expect("predict_fn must return (actions, log_probs, values)");
+
+                let actions: Vec<usize> = tuple
+                    .get_item(0).unwrap()
+                    .extract::<Vec<usize>>()
+                    .expect("actions must be list of int");
+                let log_probs: Vec<f32> = tuple
+                    .get_item(1).unwrap()
+                    .extract::<Vec<f32>>()
+                    .expect("log_probs must be list of float");
+                let values: Vec<f32> = tuple
+                    .get_item(2).unwrap()
+                    .extract::<Vec<f32>>()
+                    .expect("values must be list of float");
+
+                (actions, log_probs, values)
+            })
+        });
+
+        // Convert trajectories to Python dicts
+        let py_results: Vec<PyObject> = trajectories
+            .into_iter()
+            .map(|traj| {
+                let dict = pyo3::types::PyDict::new_bound(py);
+                dict.set_item("observations", &traj.observations).unwrap();
+                dict.set_item("actions", &traj.actions).unwrap();
+                dict.set_item("log_probs", &traj.log_probs).unwrap();
+                dict.set_item("values", &traj.values).unwrap();
+                dict.set_item("rewards", &traj.rewards).unwrap();
+                dict.set_item("dones", &traj.dones).unwrap();
+                dict.set_item("masks", &traj.masks).unwrap();
+                dict.set_item("game_value", traj.game_value).unwrap();
+                dict.set_item("move_count", traj.move_count).unwrap();
+                dict.into()
+            })
+            .collect();
+
+        Ok(py_results)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PPOSelfPlay(n_envs={}, decks={}, opp={})",
+            self.n_envs,
+            self.deck_files.len(),
+            self.opp_onnx_path,
+        )
+    }
+}

@@ -1,0 +1,39 @@
+2026-02-11 10:17:51,989 - networks.transformer_net - INFO - 🧠 PokemonTransformer initialized: 518,862 parameters
+2026-02-11 10:17:53,436 - training.ppo_trainer - INFO - Rust PPO self-play: available
+2026-02-11 10:17:53,438 - training.ppo_trainer - INFO -   Deck files found: 29
+2026-02-11 10:17:53,438 - training.ppo_trainer - INFO - Device: cuda
+2026-02-11 10:17:53,438 - training.ppo_trainer - INFO - GPU: NVIDIA GeForce RTX 5060 Ti (15.9 GB VRAM)
+2026-02-11 10:17:53,438 - training.ppo_trainer - INFO - ========================================================================
+2026-02-11 10:17:53,438 - training.ppo_trainer - INFO - AlphaPoke -- PPO Self-Play Training Engine (Beyond DeepMind)
+2026-02-11 10:17:53,438 - training.ppo_trainer - INFO - ========================================================================
+2026-02-11 10:17:53,438 - training.ppo_trainer - INFO - Generations: 0 -> 1 (2 remaining)
+2026-02-11 10:17:53,438 - training.ppo_trainer - INFO - Self-Play: 16 games/gen, 8 envs, 16 threads (device: cuda)
+2026-02-11 10:17:53,438 - training.ppo_trainer - INFO - Training: batch=512, epochs=4, lr=0.0003
+2026-02-11 10:17:53,438 - training.ppo_trainer - INFO - ------------------------------------------------------------------------
+2026-02-11 10:17:53,438 - training.ppo_trainer - INFO - Active Features:
+2026-02-11 10:17:53,438 - training.ppo_trainer - INFO -   -- SELF-PLAY ----------------------------------------
+2026-02-11 10:17:53,438 - training.ppo_trainer - INFO -   PPO Policy (no MCTS)              | 8 parallel envs
+2026-02-11 10:17:53,438 - training.ppo_trainer - INFO -   Self-play engine                   | Rust loop (zero Python overhead)
+2026-02-11 10:17:53,438 - training.ppo_trainer - INFO -   Full deckgym simulation            | 100% real game rules
+2026-02-11 10:17:53,438 - training.ppo_trainer - INFO -   Batched GPU inference              | 512 batch size
+2026-02-11 10:17:53,443 - training.ppo_trainer - INFO -   Population opponents               | pool=20, Elo tracking
+2026-02-11 10:17:53,443 - training.ppo_trainer - INFO -   Opponent refresh                   | every 5 gens
+2026-02-11 10:17:53,443 - training.ppo_trainer - INFO -   -- PPO TRAINING (BEYOND DEEPMIND) -------------------
+2026-02-11 10:17:53,443 - training.ppo_trainer - INFO -   Clip ratio                         | 0.2
+2026-02-11 10:17:53,443 - training.ppo_trainer - INFO -   Entropy scheduling                 | 0.02 -> 0.005 over 200 gens
+2026-02-11 10:17:53,443 - training.ppo_trainer - INFO -   Clipped value loss                 | Yes (range=0.2)
+2026-02-11 10:17:53,443 - training.ppo_trainer - INFO -   LR warmup                          | 10 gens linear
+2026-02-11 10:17:53,443 - training.ppo_trainer - INFO -   Value coefficient                  | 0.5
+2026-02-11 10:17:53,443 - training.ppo_trainer - INFO -   GAE lambda                         | 0.95
+2026-02-11 10:17:53,443 - training.ppo_trainer - INFO -   Discount gamma                     | 0.99
+2026-02-11 10:17:53,443 - training.ppo_trainer - INFO -   PPO epochs                         | 4
+2026-02-11 10:17:53,443 - training.ppo_trainer - INFO -   Max grad norm                      | 0.5
+2026-02-11 10:17:53,443 - training.ppo_trainer - INFO -   -- EVALUATION ---------------------------------------
+2026-02-11 10:17:53,443 - training.ppo_trainer - INFO -   Eval vs heuristic                  | every 999 gens, 50 games
+2026-02-11 10:17:53,443 - training.ppo_trainer - INFO -   -- INFRASTRUCTURE -----------------------------------
+2026-02-11 10:17:53,443 - training.ppo_trainer - INFO -   FP16 mixed precision               | Yes
+2026-02-11 10:17:53,443 - training.ppo_trainer - INFO -   Pin memory                         | Yes
+2026-02-11 10:17:53,443 - training.ppo_trainer - INFO -   LR schedule                        | step=150, gamma=0.5
+2026-02-11 10:17:53,444 - training.ppo_trainer - INFO -   Save dir                           | models/ppo_test
+2026-02-11 10:17:53,444 - training.ppo_trainer - INFO - ========================================================================
+2026-02-11 10:17:54,053 - training.ppo_trainer - INFO -   Self-Play: 16 games, 8 Rust envs, ONNX opponent, zero Python overhead

@@ -46,3 +46,9 @@ try:
     __all__.append("CrossGameSelfPlay")
 except ImportError:
     pass
+
+try:
+    from .deckgym import PyPPOSelfPlay as PPOSelfPlay
+    __all__.append("PPOSelfPlay")
+except ImportError:
+    pass
