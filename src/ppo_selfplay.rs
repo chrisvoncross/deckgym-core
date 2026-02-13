@@ -32,13 +32,20 @@ use crate::state::{GameOutcome, State};
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Opponent type for league training diversity.
+/// Multiple exploiter types prevent strategy collapse by exposing the agent
+/// to fundamentally different playstyles (AlphaStar exploiter concept).
 #[derive(Clone, Copy, PartialEq)]
 enum OpponentType {
     /// ONNX policy (learned, from population). Main self-play.
     SelfPlay,
-    /// Priority heuristic (attack > evolve > energy > trainer > end).
-    /// Prevents strategy collapse — fundamentally different playstyle.
+    /// Balanced heuristic: attack > evolve > energy > trainer > end.
     Heuristic,
+    /// Aggressive exploiter: always attack first, ignore setup.
+    Aggressive,
+    /// Defensive exploiter: bench + evolve before attacking.
+    Defensive,
+    /// Energy-rush exploiter: energy attachment > attack > evolve.
+    EnergyRush,
     /// Uniform random action selection. Maximum diversity.
     Random,
 }
@@ -132,8 +139,109 @@ fn random_select_action(mask: &[f32], rng: &mut StdRng) -> usize {
     valid[rng.gen_range(0..valid.len())]
 }
 
+/// Aggressive exploiter: attack-first, ignore setup.
+/// Punishes agents that over-invest in setup without defending.
+fn aggressive_select_action(
+    _actions: &[crate::actions::Action],
+    _action_map: &HashMap<usize, usize>,
+    mask: &[f32],
+    rng: &mut StdRng,
+) -> usize {
+    // Attack actions first: 4, 5
+    for &a in &[4usize, 5] {
+        if mask[a] > 0.0 { return a; }
+    }
+    // Abilities that might enable attacks: 18-21
+    for a in 18..=21 {
+        if mask[a] > 0.0 { return a; }
+    }
+    // Energy (to enable future attacks): 6-9
+    for a in 6..=9 {
+        if mask[a] > 0.0 { return a; }
+    }
+    // Fallback to heuristic for remaining
+    heuristic_select_action(_actions, _action_map, mask, rng)
+}
+
+/// Defensive exploiter: bench + evolve before attacking.
+/// Punishes agents that rush attacks without building board presence.
+fn defensive_select_action(
+    _actions: &[crate::actions::Action],
+    _action_map: &HashMap<usize, usize>,
+    mask: &[f32],
+    rng: &mut StdRng,
+) -> usize {
+    // Bench first: 10-13
+    for a in 10..=13 {
+        if mask[a] > 0.0 { return a; }
+    }
+    // Evolve: 14-17
+    for a in 14..=17 {
+        if mask[a] > 0.0 { return a; }
+    }
+    // Energy on benched/active: 6-9
+    for a in 6..=9 {
+        if mask[a] > 0.0 { return a; }
+    }
+    // Trainer/Items: 22-27
+    for a in 22..=27 {
+        if mask[a] > 0.0 { return a; }
+    }
+    // Attack only after setup: 4, 5
+    for &a in &[4usize, 5] {
+        if mask[a] > 0.0 { return a; }
+    }
+    // Fallback
+    heuristic_select_action(_actions, _action_map, mask, rng)
+}
+
+/// Energy-rush exploiter: prioritize energy attachment.
+/// Punishes agents that don't disrupt energy-heavy strategies.
+fn energy_rush_select_action(
+    _actions: &[crate::actions::Action],
+    _action_map: &HashMap<usize, usize>,
+    mask: &[f32],
+    rng: &mut StdRng,
+) -> usize {
+    // Energy actions first: 6-9
+    for a in 6..=9 {
+        if mask[a] > 0.0 { return a; }
+    }
+    // Attack: 4, 5
+    for &a in &[4usize, 5] {
+        if mask[a] > 0.0 { return a; }
+    }
+    // Evolve: 14-17
+    for a in 14..=17 {
+        if mask[a] > 0.0 { return a; }
+    }
+    // Bench: 10-13
+    for a in 10..=13 {
+        if mask[a] > 0.0 { return a; }
+    }
+    // Fallback
+    heuristic_select_action(_actions, _action_map, mask, rng)
+}
+
+/// Dispatch exploiter action selection based on opponent type.
+fn exploiter_select_action(
+    opp_type: OpponentType,
+    actions: &[crate::actions::Action],
+    action_map: &HashMap<usize, usize>,
+    mask: &[f32],
+    rng: &mut StdRng,
+) -> usize {
+    match opp_type {
+        OpponentType::Heuristic => heuristic_select_action(actions, action_map, mask, rng),
+        OpponentType::Aggressive => aggressive_select_action(actions, action_map, mask, rng),
+        OpponentType::Defensive => defensive_select_action(actions, action_map, mask, rng),
+        OpponentType::EnergyRush => energy_rush_select_action(actions, action_map, mask, rng),
+        _ => heuristic_select_action(actions, action_map, mask, rng),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
-// League opponent turns — mixed ONNX / heuristic / random
+// League opponent turns — mixed ONNX / exploiters / random
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Play all opponents' turns with league-style mixed opponents.
@@ -152,14 +260,15 @@ fn league_opponent_turns(
             }
         }
 
-        // Separate envs by opponent type
+        // Separate envs by opponent type: ONNX (batched) vs exploiters (Rust) vs random
         let mut onnx_indices: Vec<usize> = Vec::new();
         let mut onnx_action_data: Vec<(Vec<crate::actions::Action>, HashMap<usize, usize>)> = Vec::new();
         let mut obs_flat: Vec<f32> = Vec::new();
         let mut mask_flat: Vec<f32> = Vec::new();
 
-        let mut heuristic_indices: Vec<usize> = Vec::new();
-        let mut heuristic_data: Vec<(Vec<crate::actions::Action>, HashMap<usize, usize>, Vec<f32>)> = Vec::new();
+        // All exploiter types grouped: (env_index, opponent_type, actions, action_map, mask)
+        let mut exploiter_indices: Vec<usize> = Vec::new();
+        let mut exploiter_data: Vec<(OpponentType, Vec<crate::actions::Action>, HashMap<usize, usize>, Vec<f32>)> = Vec::new();
 
         let mut random_indices: Vec<usize> = Vec::new();
         let mut random_masks: Vec<Vec<f32>> = Vec::new();
@@ -181,9 +290,13 @@ fn league_opponent_turns(
                     onnx_indices.push(i);
                     onnx_action_data.push((actions, action_map));
                 }
-                OpponentType::Heuristic => {
-                    heuristic_indices.push(i);
-                    heuristic_data.push((actions, action_map, mask_f));
+                // All exploiter types: heuristic, aggressive, defensive, energy-rush
+                OpponentType::Heuristic
+                | OpponentType::Aggressive
+                | OpponentType::Defensive
+                | OpponentType::EnergyRush => {
+                    exploiter_indices.push(i);
+                    exploiter_data.push((env.opponent_type, actions, action_map, mask_f));
                 }
                 OpponentType::Random => {
                     random_indices.push(i);
@@ -192,7 +305,7 @@ fn league_opponent_turns(
             }
         }
 
-        let any_active = !onnx_indices.is_empty() || !heuristic_indices.is_empty() || !random_indices.is_empty();
+        let any_active = !onnx_indices.is_empty() || !exploiter_indices.is_empty() || !random_indices.is_empty();
         if !any_active { break; }
 
         // ONNX opponents: batched inference
@@ -223,11 +336,11 @@ fn league_opponent_turns(
             }
         }
 
-        // Heuristic opponents: priority-based (no ONNX)
-        for (idx, &env_i) in heuristic_indices.iter().enumerate() {
-            let (ref actions, ref action_map, ref mask) = heuristic_data[idx];
+        // Exploiter opponents: dispatched by type (no ONNX — pure Rust)
+        for (idx, &env_i) in exploiter_indices.iter().enumerate() {
+            let (opp_type, ref actions, ref action_map, ref mask) = exploiter_data[idx];
             let env = &mut envs[env_i];
-            let sem = heuristic_select_action(actions, action_map, mask, &mut env.rng);
+            let sem = exploiter_select_action(opp_type, actions, action_map, mask, &mut env.rng);
             if let Some(&di) = action_map.get(&sem) {
                 if di < actions.len() { apply_action(&mut env.rng, &mut env.state, &actions[di]); }
             } else if !actions.is_empty() {
@@ -294,12 +407,24 @@ impl PPOSelfPlay {
     }
 
     /// Assign opponent type based on league ratios.
+    /// The heuristic slice is split equally among 4 exploiter types:
+    /// Heuristic (balanced), Aggressive, Defensive, EnergyRush.
     fn assign_opponent_type(&self, rng: &mut StdRng) -> OpponentType {
         let r: f32 = rng.gen();
         if r < self.selfplay_ratio {
             OpponentType::SelfPlay
         } else if r < self.selfplay_ratio + self.heuristic_ratio {
-            OpponentType::Heuristic
+            // Split exploiter slot equally among 4 strategies
+            let exploiter_r: f32 = rng.gen();
+            if exploiter_r < 0.25 {
+                OpponentType::Heuristic
+            } else if exploiter_r < 0.50 {
+                OpponentType::Aggressive
+            } else if exploiter_r < 0.75 {
+                OpponentType::Defensive
+            } else {
+                OpponentType::EnergyRush
+            }
         } else {
             OpponentType::Random
         }
@@ -435,7 +560,7 @@ impl PPOSelfPlay {
 
         // Track opponent type stats
         let mut sp_games = 0u32;
-        let mut heur_games = 0u32;
+        let mut exploiter_games = 0u32;  // heuristic + aggressive + defensive + energy_rush
         let mut rand_games = 0u32;
 
         while completed < num_games {
@@ -485,7 +610,10 @@ impl PPOSelfPlay {
                 if done {
                     match env.opponent_type {
                         OpponentType::SelfPlay => sp_games += 1,
-                        OpponentType::Heuristic => heur_games += 1,
+                        OpponentType::Heuristic
+                        | OpponentType::Aggressive
+                        | OpponentType::Defensive
+                        | OpponentType::EnergyRush => exploiter_games += 1,
                         OpponentType::Random => rand_games += 1,
                     }
 
@@ -515,9 +643,9 @@ impl PPOSelfPlay {
 
         let elapsed = start.elapsed().as_secs_f64();
         log::info!(
-            "Rust PPO self-play: {} games in {:.1}s ({:.1} games/s) | League: {}sp + {}heur + {}rand",
+            "Rust PPO self-play: {} games in {:.1}s ({:.1} games/s) | League: {}sp + {}exploit + {}rand",
             completed, elapsed, completed as f64 / elapsed.max(0.001),
-            sp_games, heur_games, rand_games,
+            sp_games, exploiter_games, rand_games,
         );
 
         all_trajectories
