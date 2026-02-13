@@ -265,6 +265,16 @@ impl PyPlayedCard {
     }
 
     #[getter]
+    fn burned(&self) -> bool {
+        self.played_card.burned
+    }
+
+    #[getter]
+    fn confused(&self) -> bool {
+        self.played_card.confused
+    }
+
+    #[getter]
     fn is_damaged(&self) -> bool {
         self.played_card.is_damaged()
     }
@@ -272,6 +282,16 @@ impl PyPlayedCard {
     #[getter]
     fn has_tool_attached(&self) -> bool {
         self.played_card.has_tool_attached()
+    }
+
+    /// Stage of the underlying card: 0=Basic, 1=Stage1, 2=Stage2.
+    /// Returns 0 for non-Pokemon (fossils treated as basic).
+    #[getter]
+    fn stage(&self) -> u8 {
+        match &self.played_card.card {
+            crate::models::Card::Pokemon(p) => p.stage,
+            _ => 0,
+        }
     }
 
     #[getter]
@@ -420,6 +440,12 @@ impl PyState {
     #[getter]
     fn has_retreated(&self) -> bool {
         self.state.has_retreated
+    }
+
+    /// Whether a stadium card is currently in play.
+    #[getter]
+    fn has_active_stadium(&self) -> bool {
+        self.state.active_stadium.is_some()
     }
 
     fn is_game_over(&self) -> bool {

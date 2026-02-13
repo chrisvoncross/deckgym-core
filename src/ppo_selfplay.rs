@@ -61,6 +61,53 @@ struct GameEnv {
     pending_actions: Vec<crate::actions::Action>,
     pending_action_map: HashMap<usize, usize>,
     pending_mask: [f32; NUM_ACTIONS],
+    prev_potential: f32,  // For reward shaping
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Potential-based reward shaping (Ng et al., 1999)
+// ═══════════════════════════════════════════════════════════════════════
+// Φ(s) = w_prize*(own-opp)/3 + w_hp*(own_hp_ratio - opp_hp_ratio) + w_board*(own-opp)/4
+// Shaped reward: r_shaped = r_env + γ·Φ(s') − Φ(s)
+// Guaranteed optimal-policy-preserving.
+
+const SHAPING_PRIZE_W: f32 = 0.5;
+const SHAPING_HP_W: f32 = 0.15;
+const SHAPING_BOARD_W: f32 = 0.1;
+const SHAPING_GAMMA: f32 = 0.99;
+
+fn compute_potential(state: &State, agent: usize) -> f32 {
+    let opp = 1 - agent;
+    let prize_diff = (state.points[agent] as f32 - state.points[opp] as f32) / 3.0;
+
+    let mut own_hp = 0.0f32;
+    let mut own_max = 0.0f32;
+    let mut opp_hp = 0.0f32;
+    let mut opp_max = 0.0f32;
+    let mut own_count = 0.0f32;
+    let mut opp_count = 0.0f32;
+
+    for slot in &state.in_play_pokemon[agent] {
+        if let Some(pc) = slot {
+            own_hp += pc.get_remaining_hp() as f32;
+            own_max += pc.get_effective_total_hp() as f32;
+            own_count += 1.0;
+        }
+    }
+    for slot in &state.in_play_pokemon[opp] {
+        if let Some(pc) = slot {
+            opp_hp += pc.get_remaining_hp() as f32;
+            opp_max += pc.get_effective_total_hp() as f32;
+            opp_count += 1.0;
+        }
+    }
+
+    let own_ratio = if own_max > 0.0 { own_hp / own_max } else { 0.0 };
+    let opp_ratio = if opp_max > 0.0 { opp_hp / opp_max } else { 0.0 };
+    let hp_diff = own_ratio - opp_ratio;
+    let board_diff = (own_count - opp_count) / 4.0;
+
+    SHAPING_PRIZE_W * prize_diff + SHAPING_HP_W * hp_diff + SHAPING_BOARD_W * board_diff
 }
 
 pub struct GameTrajectory {
@@ -449,6 +496,7 @@ impl PPOSelfPlay {
         let agent = rng.gen_range(0..2usize);
         let opp_type = self.assign_opponent_type(rng);
 
+        let pot = compute_potential(&state, agent);
         self.envs.push(GameEnv {
             state,
             rng: env_rng,
@@ -460,6 +508,7 @@ impl PPOSelfPlay {
             pending_actions: Vec::new(),
             pending_action_map: HashMap::new(),
             pending_mask: [0.0; NUM_ACTIONS],
+            prev_potential: pot,
         });
     }
 
@@ -475,6 +524,7 @@ impl PPOSelfPlay {
         let agent = rng.gen_range(0..2usize);
         let opp_type = self.assign_opponent_type(&mut rng);
 
+        let pot = compute_potential(&state, agent);
         self.envs[idx] = GameEnv {
             state,
             rng: env_rng,
@@ -486,6 +536,7 @@ impl PPOSelfPlay {
             pending_actions: Vec::new(),
             pending_action_map: HashMap::new(),
             pending_mask: [0.0; NUM_ACTIONS],
+            prev_potential: pot,
         };
     }
 
@@ -596,13 +647,25 @@ impl PPOSelfPlay {
                 env.move_count += 1;
 
                 let done = env.state.is_game_over() || env.total_actions >= 500;
-                let reward = if done {
+                let terminal_reward = if done {
                     match env.state.winner {
                         Some(GameOutcome::Win(p)) if p == env.agent => 1.0,
                         Some(GameOutcome::Win(_)) => -1.0,
                         _ => 0.0,
                     }
                 } else { 0.0 };
+
+                // Potential-based reward shaping (Ng et al., 1999)
+                let reward = if done {
+                    // Terminal: r + 0 − Φ(s)  (absorbing state Φ=0)
+                    terminal_reward - env.prev_potential
+                } else {
+                    // Non-terminal: r + γ·Φ(s') − Φ(s)
+                    let new_pot = compute_potential(&env.state, env.agent);
+                    let shaped = SHAPING_GAMMA * new_pot - env.prev_potential;
+                    env.prev_potential = new_pot;
+                    shaped
+                };
 
                 env_rewards[idx].push(reward);
                 env_dones[idx].push(if done { 1.0 } else { 0.0 });
@@ -625,7 +688,7 @@ impl PPOSelfPlay {
                         rewards: std::mem::take(&mut env_rewards[idx]),
                         dones: std::mem::take(&mut env_dones[idx]),
                         masks: std::mem::take(&mut env_masks[idx]),
-                        game_value: reward,
+                        game_value: terminal_reward,  // Raw terminal for win tracking
                         move_count: env.move_count,
                     };
 
