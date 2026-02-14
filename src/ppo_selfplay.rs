@@ -24,6 +24,7 @@ use crate::alphazero_mcts::{
     NUM_ACTIONS,
 };
 use crate::deck::Deck;
+use crate::models::Card;
 use crate::onnx_predictor::OnnxPredictor;
 use crate::state::{GameOutcome, State};
 
@@ -133,49 +134,104 @@ pub struct PendingBatch {
 // Opponent implementations
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Heuristic opponent: priority-based action selection.
-/// Attack > Evolve > Energy > Trainer > Bench > Ability > EndTurn.
+/// State-aware heuristic opponent.
+/// Considers: evolve-before-attack, KO potential, damage comparison,
+/// type weakness (+20), low-HP retreat, smart energy placement.
 fn heuristic_select_action(
-    actions: &[crate::actions::Action],
-    action_map: &HashMap<usize, usize>,
+    _actions: &[crate::actions::Action],
+    _action_map: &HashMap<usize, usize>,
     mask: &[f32],
     _rng: &mut StdRng,
+    state: &State,
+    player: usize,
 ) -> usize {
-    // Semantic action priority groups (roughly matching the Python heuristic)
-    // Attack actions: 4, 5 (ATTACK_0, ATTACK_1)
-    for &a in &[4usize, 5] {
-        if mask[a] > 0.0 { return a; }
+    let opp = 1 - player;
+    let our_active = state.in_play_pokemon[player][0].as_ref();
+    let their_active = state.in_play_pokemon[opp][0].as_ref();
+
+    // ── 1. Evolve active first (unlocks better attacks, more HP) ───
+    if mask[14] > 0.0 { return 14; } // EVOLVE_ACTIVE
+
+    // ── 2. Attack with damage/KO awareness ─────────────────────────
+    let can_atk0 = mask[4] > 0.0;
+    let can_atk1 = mask[5] > 0.0;
+
+    if can_atk0 || can_atk1 {
+        if let (Some(us), Some(them)) = (our_active, their_active) {
+            let their_hp = them.get_remaining_hp();
+            let our_type = us.get_energy_type();
+            let their_weakness = if let Card::Pokemon(pc) = &them.card {
+                pc.weakness
+            } else {
+                None
+            };
+            // Pokemon TCG Pocket: weakness = +20 flat
+            let wb: u32 = if their_weakness.is_some() && their_weakness == our_type { 20 } else { 0 };
+
+            let attacks = us.get_attacks();
+            let dmg0 = if can_atk0 && !attacks.is_empty() { attacks[0].fixed_damage + wb } else { 0 };
+            let dmg1 = if can_atk1 && attacks.len() > 1 { attacks[1].fixed_damage + wb } else { 0 };
+
+            // Prefer the attack that KOs
+            if can_atk1 && dmg1 >= their_hp && their_hp > 0 { return 5; }
+            if can_atk0 && dmg0 >= their_hp && their_hp > 0 { return 4; }
+
+            // Otherwise prefer higher damage
+            if can_atk0 && can_atk1 {
+                return if dmg1 > dmg0 { 5 } else { 4 };
+            }
+        }
+        // Fallback: any available attack
+        if can_atk1 { return 5; }
+        if can_atk0 { return 4; }
     }
-    // Evolve actions: 14-17
-    for a in 14..=17 {
-        if mask[a] > 0.0 { return a; }
+
+    // ── 3. Retreat if active is critically low HP ──────────────────
+    if let Some(us) = our_active {
+        let hp = us.get_remaining_hp();
+        let max_hp = us.get_effective_total_hp();
+        // Retreat if ≤30 HP absolute or ≤25% relative
+        if hp <= 30 || (max_hp > 0 && hp * 4 <= max_hp) {
+            let mut best_sem: Option<usize> = None;
+            let mut best_hp = 0u32;
+            // RETREAT_BENCH_0=34 → slot 1, _1=35 → slot 2, _2=36 → slot 3
+            for &(slot, sem) in &[(1usize, 34usize), (2, 35), (3, 36)] {
+                if mask[sem] > 0.0 {
+                    if let Some(pc) = &state.in_play_pokemon[player][slot] {
+                        let bhp = pc.get_remaining_hp();
+                        if bhp > best_hp { best_hp = bhp; best_sem = Some(sem); }
+                    }
+                }
+            }
+            if let Some(r) = best_sem {
+                if best_hp > hp { return r; }
+            }
+        }
     }
-    // Energy actions: 6-9
-    for a in 6..=9 {
-        if mask[a] > 0.0 { return a; }
-    }
-    // Trainer/Item actions: 22-27
-    for a in 22..=27 {
-        if mask[a] > 0.0 { return a; }
-    }
-    // Bench actions: 10-13
-    for a in 10..=13 {
-        if mask[a] > 0.0 { return a; }
-    }
-    // Ability actions: 18-21
-    for a in 18..=21 {
-        if mask[a] > 0.0 { return a; }
-    }
-    // Retreat: 28, 34-36
-    for &a in &[28usize, 34, 35, 36] {
-        if mask[a] > 0.0 { return a; }
-    }
-    // EndTurn: 0
+
+    // ── 4. Evolve bench ────────────────────────────────────────────
+    for a in 15..=17 { if mask[a] > 0.0 { return a; } }
+
+    // ── 5. Energy (active first — we couldn't attack, so fuel it) ──
+    if mask[6] > 0.0 { return 6; } // ADD_ENERGY_ACTIVE
+    for a in 7..=9 { if mask[a] > 0.0 { return a; } }
+
+    // ── 6. Trainer / Item cards ────────────────────────────────────
+    for a in 22..=27 { if mask[a] > 0.0 { return a; } }
+
+    // ── 7. Bench Pokémon ───────────────────────────────────────────
+    for a in 10..=13 { if mask[a] > 0.0 { return a; } }
+
+    // ── 8. Abilities ───────────────────────────────────────────────
+    for a in 18..=21 { if mask[a] > 0.0 { return a; } }
+
+    // ── 9. Non-emergency retreat ───────────────────────────────────
+    for &a in &[34usize, 35, 36] { if mask[a] > 0.0 { return a; } }
+
+    // EndTurn
     if mask[0] > 0.0 { return 0; }
-    // Fallback: first legal action
-    for a in 0..NUM_ACTIONS {
-        if mask[a] > 0.0 { return a; }
-    }
+    // Absolute fallback
+    for a in 0..NUM_ACTIONS { if mask[a] > 0.0 { return a; } }
     0
 }
 
@@ -193,6 +249,8 @@ fn aggressive_select_action(
     _action_map: &HashMap<usize, usize>,
     mask: &[f32],
     rng: &mut StdRng,
+    state: &State,
+    player: usize,
 ) -> usize {
     // Attack actions first: 4, 5
     for &a in &[4usize, 5] {
@@ -207,7 +265,7 @@ fn aggressive_select_action(
         if mask[a] > 0.0 { return a; }
     }
     // Fallback to heuristic for remaining
-    heuristic_select_action(_actions, _action_map, mask, rng)
+    heuristic_select_action(_actions, _action_map, mask, rng, state, player)
 }
 
 /// Defensive exploiter: bench + evolve before attacking.
@@ -217,6 +275,8 @@ fn defensive_select_action(
     _action_map: &HashMap<usize, usize>,
     mask: &[f32],
     rng: &mut StdRng,
+    state: &State,
+    player: usize,
 ) -> usize {
     // Bench first: 10-13
     for a in 10..=13 {
@@ -239,7 +299,7 @@ fn defensive_select_action(
         if mask[a] > 0.0 { return a; }
     }
     // Fallback
-    heuristic_select_action(_actions, _action_map, mask, rng)
+    heuristic_select_action(_actions, _action_map, mask, rng, state, player)
 }
 
 /// Energy-rush exploiter: prioritize energy attachment.
@@ -249,6 +309,8 @@ fn energy_rush_select_action(
     _action_map: &HashMap<usize, usize>,
     mask: &[f32],
     rng: &mut StdRng,
+    state: &State,
+    player: usize,
 ) -> usize {
     // Energy actions first: 6-9
     for a in 6..=9 {
@@ -267,7 +329,7 @@ fn energy_rush_select_action(
         if mask[a] > 0.0 { return a; }
     }
     // Fallback
-    heuristic_select_action(_actions, _action_map, mask, rng)
+    heuristic_select_action(_actions, _action_map, mask, rng, state, player)
 }
 
 /// Dispatch exploiter action selection based on opponent type.
@@ -277,13 +339,15 @@ fn exploiter_select_action(
     action_map: &HashMap<usize, usize>,
     mask: &[f32],
     rng: &mut StdRng,
+    state: &State,
+    player: usize,
 ) -> usize {
     match opp_type {
-        OpponentType::Heuristic => heuristic_select_action(actions, action_map, mask, rng),
-        OpponentType::Aggressive => aggressive_select_action(actions, action_map, mask, rng),
-        OpponentType::Defensive => defensive_select_action(actions, action_map, mask, rng),
-        OpponentType::EnergyRush => energy_rush_select_action(actions, action_map, mask, rng),
-        _ => heuristic_select_action(actions, action_map, mask, rng),
+        OpponentType::Heuristic => heuristic_select_action(actions, action_map, mask, rng, state, player),
+        OpponentType::Aggressive => aggressive_select_action(actions, action_map, mask, rng, state, player),
+        OpponentType::Defensive => defensive_select_action(actions, action_map, mask, rng, state, player),
+        OpponentType::EnergyRush => energy_rush_select_action(actions, action_map, mask, rng, state, player),
+        _ => heuristic_select_action(actions, action_map, mask, rng, state, player),
     }
 }
 
@@ -387,7 +451,11 @@ fn league_opponent_turns(
         for (idx, &env_i) in exploiter_indices.iter().enumerate() {
             let (opp_type, ref actions, ref action_map, ref mask) = exploiter_data[idx];
             let env = &mut envs[env_i];
-            let sem = exploiter_select_action(opp_type, actions, action_map, mask, &mut env.rng);
+            let opp_player = 1 - env.agent;
+            let sem = exploiter_select_action(
+                opp_type, actions, action_map, mask, &mut env.rng,
+                &env.state, opp_player,
+            );
             if let Some(&di) = action_map.get(&sem) {
                 if di < actions.len() { apply_action(&mut env.rng, &mut env.state, &actions[di]); }
             } else if !actions.is_empty() {

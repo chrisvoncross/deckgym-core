@@ -33,6 +33,8 @@ pub struct State {
     // Player that needs to select from playable actions. Might not be aligned
     // with coin toss and the parity, see Sabrina.
     pub current_player: usize,
+    /// Which player went first (set by coin flip in initialize()).
+    pub starting_player: usize,
     pub(crate) end_turn_pending: bool,
     pub move_generation_stack: Vec<(usize, Vec<SimpleAction>)>,
 
@@ -63,6 +65,7 @@ impl State {
             points: [0, 0],
             turn_count: 0,
             current_player: 0,
+            starting_player: 0,
             end_turn_pending: false,
             move_generation_stack: Vec::new(),
             current_energy: None,
@@ -130,6 +133,7 @@ impl State {
         }
         // Flip a coin to determine the starting player
         state.current_player = rng.gen_range(0..2);
+        state.starting_player = state.current_player;
 
         state
     }

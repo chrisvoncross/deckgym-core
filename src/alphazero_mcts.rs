@@ -255,7 +255,7 @@ impl NodeArena {
 // Observation building — port of _get_observation() / _encode_played_card()
 // ═══════════════════════════════════════════════════════════════════════
 
-const MAX_TURNS: f32 = 100.0;
+const MAX_TURNS: f32 = 50.0;
 
 /// Encode a single PlayedCard into the observation vector at `slot`.
 fn encode_played_card(obs: &mut [f32; OBS_SIZE], slot: usize, pc: &PlayedCard) {
@@ -346,8 +346,8 @@ pub(crate) fn build_observation(state: &State, agent: usize) -> [f32; OBS_SIZE] 
     // has_energy
     obs[g + 4] = if state.current_energy.is_some() { 1.0 } else { 0.0 };
     obs[g + 5] = if state.has_played_support { 1.0 } else { 0.0 };
-    // agent_starts — we encode as 1.0 if agent == 0 (simplification — matches Python)
-    obs[g + 6] = if agent == 0 { 1.0 } else { 0.0 };
+    // agent_starts — 1.0 if the agent was the first player (coin flip winner)
+    obs[g + 6] = if state.starting_player == agent { 1.0 } else { 0.0 };
     // Current energy type one-hot (10 slots: g+7..g+16)
     if let Some(ce) = state.current_energy {
         obs[g + 7 + energy_idx(ce)] = 1.0;
