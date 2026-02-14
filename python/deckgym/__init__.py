@@ -52,3 +52,9 @@ try:
     __all__.append("PPOSelfPlay")
 except ImportError:
     pass
+
+try:
+    from .deckgym import py_eval_onnx as eval_onnx
+    __all__.append("eval_onnx")
+except ImportError:
+    pass

@@ -7,7 +7,7 @@ use crate::{
     deck::Deck,
     game::Game,
     models::{Ability, Attack, Card, EnergyType, PlayedCard},
-    players::{create_players, fill_code_array, parse_player_code},
+    players::{create_players, fill_code_array, parse_player_code, get_player},
     state::{GameOutcome, State},
 };
 
@@ -1018,7 +1018,93 @@ pub fn get_player_types() -> HashMap<String, String> {
     types.insert("m".to_string(), "MCTS Player".to_string());
     types.insert("v".to_string(), "Value Function Player".to_string());
     types.insert("e".to_string(), "Expectiminimax Player".to_string());
+    types.insert("onnx:<path>".to_string(), "ONNX Neural Network Player".to_string());
     types
+}
+
+/// Evaluate an ONNX model against a deckgym bot.
+///
+/// Loads the model ONCE, then runs `num_games` sequential games.
+/// Returns PySimulationResults with win/loss/tie stats.
+///
+/// `opponent`: standard player code (e.g. "r", "v", "e3", "aa")
+/// `model_plays_as`: 0 = model is player A, 1 = model is player B
+#[cfg(feature = "onnx")]
+#[pyfunction]
+#[pyo3(signature = (model_path, deck_a_path, deck_b_path, opponent="r", num_games=200, model_plays_as=0, seed=None))]
+pub fn py_eval_onnx(
+    model_path: &str,
+    deck_a_path: &str,
+    deck_b_path: &str,
+    opponent: &str,
+    num_games: u32,
+    model_plays_as: usize,
+    seed: Option<u64>,
+) -> PyResult<PySimulationResults> {
+    use std::sync::{Arc, Mutex};
+    use crate::onnx_predictor::OnnxPredictor;
+    use crate::players::OnnxPlayer;
+
+    let deck_a = Deck::from_file(deck_a_path).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Failed to load deck A: {}", e))
+    })?;
+    let deck_b = Deck::from_file(deck_b_path).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Failed to load deck B: {}", e))
+    })?;
+
+    let opp_code = parse_player_code(opponent)
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+    // Load ONNX model once
+    let predictor = OnnxPredictor::new(std::path::Path::new(model_path)).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to load ONNX model '{}': {}", model_path, e
+        ))
+    })?;
+    let shared_pred = Arc::new(Mutex::new(predictor));
+
+    let mut wins_per_deck = [0u32, 0u32, 0u32]; // [player_a, player_b, ties]
+
+    for game_idx in 0..num_games {
+        let model_deck = if model_plays_as == 0 { deck_a.clone() } else { deck_b.clone() };
+        let opp_deck = if model_plays_as == 0 { deck_b.clone() } else { deck_a.clone() };
+
+        let onnx_player: Box<dyn crate::players::Player> = Box::new(
+            OnnxPlayer::with_shared_predictor(model_deck, shared_pred.clone()),
+        );
+        let opp_player: Box<dyn crate::players::Player> = get_player(opp_deck, &opp_code);
+
+        let players = if model_plays_as == 0 {
+            vec![onnx_player, opp_player]
+        } else {
+            vec![opp_player, onnx_player]
+        };
+
+        let game_seed = seed.map(|s| s + game_idx as u64).unwrap_or_else(rand::random::<u64>);
+        let mut game = Game::new(players, game_seed);
+        let outcome = game.play();
+
+        match outcome {
+            Some(GameOutcome::Win(winner)) => {
+                if winner < 2 {
+                    wins_per_deck[winner] += 1;
+                }
+            }
+            Some(GameOutcome::Tie) | None => {
+                wins_per_deck[2] += 1;
+            }
+        }
+    }
+
+    Ok(PySimulationResults {
+        total_games: num_games,
+        player_a_wins: wins_per_deck[0],
+        player_b_wins: wins_per_deck[1],
+        ties: wins_per_deck[2],
+        player_a_win_rate: wins_per_deck[0] as f32 / num_games as f32,
+        player_b_win_rate: wins_per_deck[1] as f32 / num_games as f32,
+        tie_rate: wins_per_deck[2] as f32 / num_games as f32,
+    })
 }
 
 /// Python module definition
@@ -1044,5 +1130,7 @@ pub fn deckgym(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::alphazero_mcts::PyPPOSelfPlay>()?;
     m.add_function(wrap_pyfunction!(py_simulate, m)?)?;
     m.add_function(wrap_pyfunction!(get_player_types, m)?)?;
+    #[cfg(feature = "onnx")]
+    m.add_function(wrap_pyfunction!(py_eval_onnx, m)?)?;
     Ok(())
 }

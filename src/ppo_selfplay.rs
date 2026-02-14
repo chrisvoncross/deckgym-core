@@ -26,6 +26,7 @@ use crate::alphazero_mcts::{
 use crate::deck::Deck;
 use crate::models::Card;
 use crate::onnx_predictor::OnnxPredictor;
+use crate::players::{Player, ValueFunctionPlayer, ExpectiMiniMaxPlayer, baseline_value_function};
 use crate::state::{GameOutcome, State};
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -49,6 +50,12 @@ enum OpponentType {
     EnergyRush,
     /// Uniform random action selection. Maximum diversity.
     Random,
+    /// Real deckgym ValueFunctionPlayer (forecast_action + simple value fn).
+    DeckgymValue,
+    /// Real deckgym ExpectiMiniMaxPlayer depth=1 (13-feature value fn).
+    DeckgymMinimax1,
+    /// Real deckgym ExpectiMiniMaxPlayer depth=2 (deeper tree search).
+    DeckgymMinimax2,
 }
 
 struct GameEnv {
@@ -63,6 +70,28 @@ struct GameEnv {
     pending_action_map: HashMap<usize, usize>,
     pending_mask: [f32; NUM_ACTIONS],
     prev_potential: f32,  // For reward shaping
+    /// Real deckgym player instance (only set for Deckgym* opponent types).
+    deckgym_player: Option<Box<dyn Player>>,
+}
+
+/// Create a deckgym Player instance for the given opponent type + deck.
+fn make_deckgym_player(opp_type: OpponentType, deck: Deck) -> Option<Box<dyn Player>> {
+    match opp_type {
+        OpponentType::DeckgymValue => Some(Box::new(ValueFunctionPlayer { deck })),
+        OpponentType::DeckgymMinimax1 => Some(Box::new(ExpectiMiniMaxPlayer {
+            deck,
+            max_depth: 1,
+            write_debug_trees: false,
+            value_function: Box::new(baseline_value_function),
+        })),
+        OpponentType::DeckgymMinimax2 => Some(Box::new(ExpectiMiniMaxPlayer {
+            deck,
+            max_depth: 2,
+            write_debug_trees: false,
+            value_function: Box::new(baseline_value_function),
+        })),
+        _ => None,
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -394,6 +423,9 @@ fn league_opponent_turns(
         let mut random_indices: Vec<usize> = Vec::new();
         let mut random_masks: Vec<Vec<f32>> = Vec::new();
 
+        // Deckgym bot indices (actions regenerated in processing pass)
+        let mut deckgym_indices: Vec<usize> = Vec::new();
+
         for (i, env) in envs.iter().enumerate() {
             if env.done || env.state.is_game_over() { continue; }
             let (actor, actions) = env.state.generate_possible_actions();
@@ -423,10 +455,17 @@ fn league_opponent_turns(
                     random_indices.push(i);
                     random_masks.push(mask_f);
                 }
+                // Real deckgym bots — processed separately via decision_fn
+                OpponentType::DeckgymValue
+                | OpponentType::DeckgymMinimax1
+                | OpponentType::DeckgymMinimax2 => {
+                    deckgym_indices.push(i);
+                }
             }
         }
 
-        let any_active = !onnx_indices.is_empty() || !exploiter_indices.is_empty() || !random_indices.is_empty();
+        let any_active = !onnx_indices.is_empty() || !exploiter_indices.is_empty()
+            || !random_indices.is_empty() || !deckgym_indices.is_empty();
         if !any_active { break; }
 
         // ONNX opponents: batched inference
@@ -485,6 +524,19 @@ fn league_opponent_turns(
                 apply_action(&mut env.rng, &mut env.state, &actions[0]);
             }
         }
+
+        // Deckgym bot opponents: use native decision_fn on raw Actions.
+        // Option::take() avoids borrow-checker conflict between player/rng/state.
+        for &env_i in &deckgym_indices {
+            let env = &mut envs[env_i];
+            let (_actor, actions) = env.state.generate_possible_actions();
+            if actions.is_empty() { continue; }
+            if let Some(mut player) = env.deckgym_player.take() {
+                let chosen = player.decision_fn(&mut env.rng, &env.state, &actions);
+                apply_action(&mut env.rng, &mut env.state, &chosen);
+                env.deckgym_player = Some(player);
+            }
+        }
     }
 }
 
@@ -500,7 +552,8 @@ pub struct PPOSelfPlay {
     // League training ratios (sum = 1.0)
     selfplay_ratio: f32,
     heuristic_ratio: f32,
-    // random_ratio = 1.0 - selfplay_ratio - heuristic_ratio
+    deckgym_ratio: f32,
+    // random_ratio = 1.0 - selfplay_ratio - heuristic_ratio - deckgym_ratio
 }
 
 impl PPOSelfPlay {
@@ -510,15 +563,18 @@ impl PPOSelfPlay {
         opp_onnx_path: &Path,
         selfplay_ratio: f32,
         heuristic_ratio: f32,
+        deckgym_ratio: f32,
     ) -> Result<Self, String> {
         let opp_predictor = OnnxPredictor::new(opp_onnx_path)
             .map_err(|e| format!("Failed to load opponent ONNX model: {}", e))?;
 
+        let random_ratio = 1.0 - selfplay_ratio - heuristic_ratio - deckgym_ratio;
         log::info!(
-            "League training: {:.0}% self-play, {:.0}% heuristic, {:.0}% random",
+            "League training: {:.0}% self-play, {:.0}% heuristic, {:.0}% deckgym, {:.0}% random",
             selfplay_ratio * 100.0,
             heuristic_ratio * 100.0,
-            (1.0 - selfplay_ratio - heuristic_ratio) * 100.0,
+            deckgym_ratio * 100.0,
+            random_ratio * 100.0,
         );
 
         Ok(PPOSelfPlay {
@@ -528,12 +584,13 @@ impl PPOSelfPlay {
             n_envs,
             selfplay_ratio,
             heuristic_ratio,
+            deckgym_ratio,
         })
     }
 
     /// Assign opponent type based on league ratios.
-    /// The heuristic slice is split equally among 4 exploiter types:
-    /// Heuristic (balanced), Aggressive, Defensive, EnergyRush.
+    /// Heuristic slice → split among 4 exploiter types.
+    /// Deckgym slice → split among Value / Minimax1 / Minimax2.
     fn assign_opponent_type(&self, rng: &mut StdRng) -> OpponentType {
         let r: f32 = rng.gen();
         if r < self.selfplay_ratio {
@@ -549,6 +606,16 @@ impl PPOSelfPlay {
                 OpponentType::Defensive
             } else {
                 OpponentType::EnergyRush
+            }
+        } else if r < self.selfplay_ratio + self.heuristic_ratio + self.deckgym_ratio {
+            // Split deckgym slot: 1/3 Value, 1/3 Minimax-1, 1/3 Minimax-2
+            let dg_r: f32 = rng.gen();
+            if dg_r < 0.333 {
+                OpponentType::DeckgymValue
+            } else if dg_r < 0.666 {
+                OpponentType::DeckgymMinimax1
+            } else {
+                OpponentType::DeckgymMinimax2
             }
         } else {
             OpponentType::Random
@@ -574,6 +641,10 @@ impl PPOSelfPlay {
         let agent = rng.gen_range(0..2usize);
         let opp_type = self.assign_opponent_type(rng);
 
+        // For deckgym bots, instantiate the real player with opponent's deck
+        let opp_deck = if agent == 0 { deck_b.clone() } else { deck_a.clone() };
+        let deckgym_player = make_deckgym_player(opp_type, opp_deck);
+
         let pot = compute_potential(&state, agent);
         self.envs.push(GameEnv {
             state,
@@ -587,6 +658,7 @@ impl PPOSelfPlay {
             pending_action_map: HashMap::new(),
             pending_mask: [0.0; NUM_ACTIONS],
             prev_potential: pot,
+            deckgym_player,
         });
     }
 
@@ -602,6 +674,9 @@ impl PPOSelfPlay {
         let agent = rng.gen_range(0..2usize);
         let opp_type = self.assign_opponent_type(&mut rng);
 
+        let opp_deck = if agent == 0 { deck_b.clone() } else { deck_a.clone() };
+        let deckgym_player = make_deckgym_player(opp_type, opp_deck);
+
         let pot = compute_potential(&state, agent);
         self.envs[idx] = GameEnv {
             state,
@@ -615,6 +690,7 @@ impl PPOSelfPlay {
             pending_action_map: HashMap::new(),
             pending_mask: [0.0; NUM_ACTIONS],
             prev_potential: pot,
+            deckgym_player,
         };
     }
 
@@ -690,6 +766,7 @@ impl PPOSelfPlay {
         // Track opponent type stats
         let mut sp_games = 0u32;
         let mut exploiter_games = 0u32;  // heuristic + aggressive + defensive + energy_rush
+        let mut deckgym_games = 0u32;    // ValueFunction + Minimax1 + Minimax2
         let mut rand_games = 0u32;
 
         while completed < num_games {
@@ -755,6 +832,9 @@ impl PPOSelfPlay {
                         | OpponentType::Aggressive
                         | OpponentType::Defensive
                         | OpponentType::EnergyRush => exploiter_games += 1,
+                        OpponentType::DeckgymValue
+                        | OpponentType::DeckgymMinimax1
+                        | OpponentType::DeckgymMinimax2 => deckgym_games += 1,
                         OpponentType::Random => rand_games += 1,
                     }
 
@@ -784,9 +864,9 @@ impl PPOSelfPlay {
 
         let elapsed = start.elapsed().as_secs_f64();
         log::info!(
-            "Rust PPO self-play: {} games in {:.1}s ({:.1} games/s) | League: {}sp + {}exploit + {}rand",
+            "Rust PPO self-play: {} games in {:.1}s ({:.1} games/s) | League: {}sp + {}exploit + {}deckgym + {}rand",
             completed, elapsed, completed as f64 / elapsed.max(0.001),
-            sp_games, exploiter_games, rand_games,
+            sp_games, exploiter_games, deckgym_games, rand_games,
         );
 
         all_trajectories

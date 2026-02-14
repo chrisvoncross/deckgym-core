@@ -4,6 +4,8 @@ mod evolution_rusher_player;
 mod expectiminimax_player;
 mod human_player;
 mod mcts_player;
+#[cfg(all(feature = "python", feature = "onnx"))]
+pub mod onnx_player;
 mod random_player;
 mod value_function_player;
 pub mod value_functions;
@@ -15,6 +17,8 @@ pub use evolution_rusher_player::EvolutionRusherPlayer;
 pub use expectiminimax_player::{ExpectiMiniMaxPlayer, ValueFunction};
 pub use human_player::HumanPlayer;
 pub use mcts_player::MctsPlayer;
+#[cfg(all(feature = "python", feature = "onnx"))]
+pub use onnx_player::OnnxPlayer;
 pub use random_player::RandomPlayer;
 pub use value_function_player::ValueFunctionPlayer;
 pub use value_functions::*;
@@ -46,9 +50,23 @@ pub enum PlayerCode {
     V,
     E { max_depth: usize },
     ER, // Evolution Rusher
+    /// Neural network player via ONNX model.
+    /// Only available with features `python` + `onnx`.
+    Onnx { model_path: String },
 }
-/// Custom parser function enforcing case-insensitivity
+/// Custom parser function enforcing case-insensitivity.
+///
+/// Supports `onnx:/path/to/model.onnx` for neural network players.
 pub fn parse_player_code(s: &str) -> Result<PlayerCode, String> {
+    // Check for "onnx:" prefix (case-insensitive)
+    if s.len() > 5 && s[..5].eq_ignore_ascii_case("onnx:") {
+        let model_path = s[5..].to_string();
+        if model_path.is_empty() {
+            return Err("onnx: requires a model path, e.g., 'onnx:models/gen50.onnx'".into());
+        }
+        return Ok(PlayerCode::Onnx { model_path });
+    }
+
     let lower = s.to_ascii_lowercase();
 
     // Check if it starts with 'e' followed by digits (e.g., e2, e4)
@@ -106,7 +124,7 @@ pub fn create_players(
     vec![player_a, player_b]
 }
 
-fn get_player(deck: Deck, player: &PlayerCode) -> Box<dyn Player> {
+pub fn get_player(deck: Deck, player: &PlayerCode) -> Box<dyn Player> {
     match player {
         PlayerCode::AA => Box::new(AttachAttackPlayer { deck }),
         PlayerCode::ET => Box::new(EndTurnPlayer { deck }),
@@ -122,5 +140,20 @@ fn get_player(deck: Deck, player: &PlayerCode) -> Box<dyn Player> {
             value_function: Box::new(value_functions::baseline_value_function),
         }),
         PlayerCode::ER => Box::new(EvolutionRusherPlayer { deck }),
+        #[cfg(all(feature = "python", feature = "onnx"))]
+        PlayerCode::Onnx { model_path } => {
+            let path = std::path::Path::new(model_path);
+            Box::new(
+                OnnxPlayer::new(deck, path)
+                    .unwrap_or_else(|e| panic!("Failed to load ONNX model '{}': {}", model_path, e)),
+            )
+        }
+        #[cfg(not(all(feature = "python", feature = "onnx")))]
+        PlayerCode::Onnx { .. } => {
+            panic!(
+                "OnnxPlayer requires features 'python' + 'onnx'. \
+                 Rebuild with: maturin develop --features 'python,onnx' --release"
+            )
+        }
     }
 }
