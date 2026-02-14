@@ -80,9 +80,9 @@ fn run_inference_server(
 ) {
     // Adaptive window: longer window = bigger batches = better GPU utilization.
     // But too long = threads idle waiting for results.
-    // Sweet spot: wait until we have a decent fraction of active threads,
-    // or until a timeout expires.
-    let max_window = Duration::from_millis(50);
+    // With 8 sims × 2 dets the NN calls are tiny — 50ms stalls devastate throughput.
+    // 5ms is enough to accumulate a good batch from 64 threads without starving them.
+    let max_window = Duration::from_millis(5);
     let min_window = Duration::from_millis(1);
 
     let mut total_batches = 0u64;

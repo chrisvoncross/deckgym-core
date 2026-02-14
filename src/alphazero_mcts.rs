@@ -659,7 +659,7 @@ pub(crate) fn auto_play_forced(state: &mut State, rng: &mut StdRng) -> u32 {
 ///   - Reducing from 200→30 saves ~85% of wasted simulation time
 ///   - For MCTS value estimation, a partial turn is sufficient
 fn opponent_turn_random(state: &mut State, rng: &mut StdRng, agent: usize) {
-    let max_actions = 30u32;  // Was 200 — most turns finish in <15 actions
+    let max_actions = 10u32;  // Was 30 — typical turn finishes in <10 actions
     let mut count = 0u32;
 
     while !state.is_game_over() && count < max_actions {
@@ -781,7 +781,97 @@ impl MCTSEngine {
     where
         F: FnMut(&[f32], &[f32], usize) -> (Vec<f32>, Vec<f32>),
     {
-        let n_dets = self.config.num_determinizations;
+        // === 0. Complexity probe — skip MCTS for trivial positions ===
+        // One cheap clone to count legal actions before any NN work.
+        let num_legal = {
+            let mut probe = state.clone();
+            let mut probe_rng = StdRng::seed_from_u64(rng.gen());
+            auto_play_forced(&mut probe, &mut probe_rng);
+            if probe.is_game_over() {
+                0
+            } else {
+                let (_, acts) = probe.generate_possible_actions();
+                let (_, amap) = build_action_map(&acts, agent);
+                amap.len()
+            }
+        };
+
+        // --- Trivial: 0-1 legal actions → instant return, 0 NN calls ---
+        if num_legal <= 1 {
+            let mut policy = [0.0f64; NUM_ACTIONS];
+            let mut probe = state.clone();
+            let mut probe_rng = StdRng::seed_from_u64(rng.gen());
+            auto_play_forced(&mut probe, &mut probe_rng);
+            if !probe.is_game_over() {
+                let (_, acts) = probe.generate_possible_actions();
+                let (_, amap) = build_action_map(&acts, agent);
+                if let Some((&a, _)) = amap.iter().next() {
+                    policy[a] = 1.0;
+                    return MCTSResult { action: a, policy };
+                }
+            }
+            policy[END_TURN] = 1.0;
+            return MCTSResult { action: END_TURN, policy };
+        }
+
+        // --- 2 actions: single NN call for prior, no tree search ---
+        if num_legal == 2 {
+            let mut probe = state.clone();
+            let mut probe_rng = StdRng::seed_from_u64(rng.gen());
+            determinize_state(&mut probe, &mut probe_rng);
+            auto_play_forced(&mut probe, &mut probe_rng);
+            let obs = build_observation(&probe, agent);
+            let (_, acts) = probe.generate_possible_actions();
+            let (mask_bool, _) = build_action_map(&acts, agent);
+            let mask_f32: Vec<f32> = mask_bool.iter()
+                .map(|&b| if b { 1.0 } else { 0.0 }).collect();
+
+            let (pol_flat, _) = predict_fn(&obs, &mask_f32, 1);
+
+            let mut policy = [0.0f64; NUM_ACTIONS];
+            for a in 0..NUM_ACTIONS {
+                if mask_bool[a] { policy[a] = pol_flat[a] as f64; }
+            }
+            let total: f64 = policy.iter().sum();
+            if total > 0.0 { for p in &mut policy { *p /= total; } }
+
+            let action = if move_number > self.config.temp_threshold {
+                // Greedy
+                (0..NUM_ACTIONS)
+                    .filter(|&a| policy[a] > 0.0)
+                    .max_by(|&a, &b| policy[a].partial_cmp(&policy[b])
+                        .unwrap_or(std::cmp::Ordering::Equal))
+                    .unwrap_or(END_TURN)
+            } else {
+                // Sample
+                let r: f64 = rng.gen();
+                let mut cum = 0.0;
+                let mut sel = END_TURN;
+                for a in 0..NUM_ACTIONS {
+                    if policy[a] > 0.0 {
+                        cum += policy[a];
+                        sel = a;
+                        if r < cum { break; }
+                    }
+                }
+                sel
+            };
+            return MCTSResult { action, policy };
+        }
+
+        // --- Adaptive complexity: fewer dets + sims for simple positions ---
+        let effective_dets = if num_legal <= 4 {
+            1usize.min(self.config.num_determinizations)
+        } else {
+            self.config.num_determinizations
+        };
+        let effective_sims = if num_legal <= 5 {
+            (self.config.num_simulations / 2).max(2)
+        } else {
+            self.config.num_simulations
+        };
+
+        let n_dets = effective_dets;
 
         // === 1. Create determinizations + batch root evaluation ===
         let mut det_states: Vec<State> = Vec::with_capacity(n_dets);
@@ -883,7 +973,7 @@ impl MCTSEngine {
             det_root_ids.push(root_id);
             det_candidates.push(candidates);
             det_gumbel_logits.push(gumbel_logits);
-            det_sims_budget.push(self.config.num_simulations);
+            det_sims_budget.push(effective_sims);
         }
 
         // === 3. Interleaved simulation loop across all determinizations ===
@@ -897,6 +987,7 @@ impl MCTSEngine {
             &det_root_ids,
             &mut det_candidates,
             &det_gumbel_logits,
+            effective_sims,
             predict_fn,
         );
 
@@ -1062,12 +1153,12 @@ impl MCTSEngine {
         root_ids: &[NodeId],
         candidates: &mut [Vec<usize>],
         gumbel_logits: &[[f64; NUM_ACTIONS]],
+        total_sims: usize,
         predict_fn: &mut F,
     ) where
         F: FnMut(&[f32], &[f32], usize) -> (Vec<f32>, Vec<f32>),
     {
         let n_dets = det_states.len();
-        let total_sims = self.config.num_simulations;
         let batch_size = self.config.leaf_batch_size;
 
         // Compute Sequential Halving schedule

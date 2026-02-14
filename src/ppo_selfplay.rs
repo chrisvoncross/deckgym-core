@@ -68,13 +68,15 @@ struct GameEnv {
 // ═══════════════════════════════════════════════════════════════════════
 // Potential-based reward shaping (Ng et al., 1999)
 // ═══════════════════════════════════════════════════════════════════════
-// Φ(s) = w_prize*(own-opp)/3 + w_hp*(own_hp_ratio - opp_hp_ratio) + w_board*(own-opp)/4
+// Φ(s) = w_prize*(own-opp)/3 + w_hp*(own_hp_ratio - opp_hp_ratio)
+//       + w_board*(own-opp)/4 + w_energy*(own_energy - opp_energy)/6
 // Shaped reward: r_shaped = r_env + γ·Φ(s') − Φ(s)
 // Guaranteed optimal-policy-preserving.
 
 const SHAPING_PRIZE_W: f32 = 0.5;
 const SHAPING_HP_W: f32 = 0.15;
 const SHAPING_BOARD_W: f32 = 0.35; // was 0.1 — too weak for bench signal
+const SHAPING_ENERGY_W: f32 = 0.20; // energy advantage — fixes credit assignment for energy mgmt
 const SHAPING_GAMMA: f32 = 0.99;
 
 fn compute_potential(state: &State, agent: usize) -> f32 {
@@ -87,12 +89,15 @@ fn compute_potential(state: &State, agent: usize) -> f32 {
     let mut opp_max = 0.0f32;
     let mut own_count = 0.0f32;
     let mut opp_count = 0.0f32;
+    let mut own_energy = 0.0f32;
+    let mut opp_energy = 0.0f32;
 
     for slot in &state.in_play_pokemon[agent] {
         if let Some(pc) = slot {
             own_hp += pc.get_remaining_hp() as f32;
             own_max += pc.get_effective_total_hp() as f32;
             own_count += 1.0;
+            own_energy += pc.attached_energy.len() as f32;
         }
     }
     for slot in &state.in_play_pokemon[opp] {
@@ -100,6 +105,7 @@ fn compute_potential(state: &State, agent: usize) -> f32 {
             opp_hp += pc.get_remaining_hp() as f32;
             opp_max += pc.get_effective_total_hp() as f32;
             opp_count += 1.0;
+            opp_energy += pc.attached_energy.len() as f32;
         }
     }
 
@@ -107,8 +113,12 @@ fn compute_potential(state: &State, agent: usize) -> f32 {
     let opp_ratio = if opp_max > 0.0 { opp_hp / opp_max } else { 0.0 };
     let hp_diff = own_ratio - opp_ratio;
     let board_diff = (own_count - opp_count) / 4.0;
+    let energy_diff = (own_energy - opp_energy) / 6.0;
 
-    SHAPING_PRIZE_W * prize_diff + SHAPING_HP_W * hp_diff + SHAPING_BOARD_W * board_diff
+    SHAPING_PRIZE_W * prize_diff
+        + SHAPING_HP_W * hp_diff
+        + SHAPING_BOARD_W * board_diff
+        + SHAPING_ENERGY_W * energy_diff
 }
 
 pub struct GameTrajectory {
