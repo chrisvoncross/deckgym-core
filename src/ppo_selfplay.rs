@@ -74,7 +74,7 @@ struct GameEnv {
 
 const SHAPING_PRIZE_W: f32 = 0.5;
 const SHAPING_HP_W: f32 = 0.15;
-const SHAPING_BOARD_W: f32 = 0.1;
+const SHAPING_BOARD_W: f32 = 0.35; // was 0.1 — too weak for bench signal
 const SHAPING_GAMMA: f32 = 0.99;
 
 fn compute_potential(state: &State, agent: usize) -> f32 {
