@@ -5,6 +5,8 @@ mod expectiminimax_player;
 mod human_player;
 mod mcts_player;
 #[cfg(all(feature = "python", feature = "onnx"))]
+pub mod cfr_player;
+#[cfg(all(feature = "python", feature = "onnx"))]
 pub mod onnx_player;
 mod random_player;
 mod value_function_player;
@@ -17,6 +19,8 @@ pub use evolution_rusher_player::EvolutionRusherPlayer;
 pub use expectiminimax_player::{ExpectiMiniMaxPlayer, ValueFunction};
 pub use human_player::HumanPlayer;
 pub use mcts_player::MctsPlayer;
+#[cfg(all(feature = "python", feature = "onnx"))]
+pub use cfr_player::{CfrConfig, CfrPlayer};
 #[cfg(all(feature = "python", feature = "onnx"))]
 pub use onnx_player::OnnxPlayer;
 pub use random_player::RandomPlayer;
@@ -53,11 +57,44 @@ pub enum PlayerCode {
     /// Neural network player via ONNX model.
     /// Only available with features `python` + `onnx`.
     Onnx { model_path: String },
+    /// Real-time CFR search player (Pluribus-level).
+    /// Only available with features `python` + `onnx`.
+    Cfr {
+        model_path: String,
+        num_determinizations: usize,
+        cfr_iterations: usize,
+        depth_limit: usize,
+    },
 }
 /// Custom parser function enforcing case-insensitivity.
 ///
-/// Supports `onnx:/path/to/model.onnx` for neural network players.
+/// Supports:
+///   - `onnx:/path/to/model.onnx` for neural network players
+///   - `cfr:model.onnx:16:8:3` for real-time CFR search (dets:iters:depth)
+///   - `cfr:model.onnx` for CFR with default params (16 dets, 8 iters, depth 3)
 pub fn parse_player_code(s: &str) -> Result<PlayerCode, String> {
+    // Check for "cfr:" prefix (case-insensitive) — must check before "onnx:"
+    if s.len() > 4 && s[..4].eq_ignore_ascii_case("cfr:") {
+        let rest = &s[4..];
+        let parts: Vec<&str> = rest.split(':').collect();
+        if parts.is_empty() || parts[0].is_empty() {
+            return Err(
+                "cfr: requires a model path, e.g., 'cfr:model.onnx' or 'cfr:model.onnx:16:8:3'"
+                    .into(),
+            );
+        }
+        let model_path = parts[0].to_string();
+        let num_determinizations = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(16);
+        let cfr_iterations = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
+        let depth_limit = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(3);
+        return Ok(PlayerCode::Cfr {
+            model_path,
+            num_determinizations,
+            cfr_iterations,
+            depth_limit,
+        });
+    }
+
     // Check for "onnx:" prefix (case-insensitive)
     if s.len() > 5 && s[..5].eq_ignore_ascii_case("onnx:") {
         let model_path = s[5..].to_string();
@@ -152,6 +189,32 @@ pub fn get_player(deck: Deck, player: &PlayerCode) -> Box<dyn Player> {
         PlayerCode::Onnx { .. } => {
             panic!(
                 "OnnxPlayer requires features 'python' + 'onnx'. \
+                 Rebuild with: maturin develop --features 'python,onnx' --release"
+            )
+        }
+        #[cfg(all(feature = "python", feature = "onnx"))]
+        PlayerCode::Cfr {
+            model_path,
+            num_determinizations,
+            cfr_iterations,
+            depth_limit,
+        } => {
+            let path = std::path::Path::new(model_path);
+            let config = CfrConfig {
+                num_determinizations: *num_determinizations,
+                cfr_iterations: *cfr_iterations,
+                depth_limit: *depth_limit,
+                ..CfrConfig::default()
+            };
+            Box::new(
+                CfrPlayer::new(deck, path, config)
+                    .unwrap_or_else(|e| panic!("Failed to load CFR model '{}': {}", model_path, e)),
+            )
+        }
+        #[cfg(not(all(feature = "python", feature = "onnx")))]
+        PlayerCode::Cfr { .. } => {
+            panic!(
+                "CfrPlayer requires features 'python' + 'onnx'. \
                  Rebuild with: maturin develop --features 'python,onnx' --release"
             )
         }
