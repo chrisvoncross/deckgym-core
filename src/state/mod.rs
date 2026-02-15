@@ -39,7 +39,7 @@ pub struct State {
     pub move_generation_stack: Vec<(usize, Vec<SimpleAction>)>,
 
     // Core state
-    pub(crate) current_energy: Option<EnergyType>,
+    pub current_energy: Option<EnergyType>,
     pub hands: [Vec<Card>; 2],
     pub decks: [Deck; 2],
     pub discard_piles: [Vec<Card>; 2],
@@ -50,7 +50,7 @@ pub struct State {
     pub active_stadium: Option<Card>,
 
     // Turn Flags (remember to reset these in reset_turn_states)
-    pub(crate) has_played_support: bool,
+    pub has_played_support: bool,
     pub(crate) has_retreated: bool,
     pub(crate) knocked_out_by_opponent_attack_this_turn: bool,
     pub(crate) knocked_out_by_opponent_attack_last_turn: bool,
@@ -337,7 +337,7 @@ impl State {
         self.generate_energy();
     }
 
-    pub(crate) fn is_game_over(&self) -> bool {
+    pub fn is_game_over(&self) -> bool {
         self.winner.is_some() || self.turn_count >= 100
     }
 

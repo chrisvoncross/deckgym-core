@@ -202,7 +202,7 @@ impl PlayedCard {
     }
 
     /// Returns effective total HP considering abilities like Reuniclus Infinite Increase
-    pub(crate) fn get_effective_total_hp(&self) -> u32 {
+    pub fn get_effective_total_hp(&self) -> u32 {
         let mut effective_hp = self.base_hp;
 
         // Tool bonuses
@@ -233,7 +233,7 @@ impl PlayedCard {
         self.poisoned || self.paralyzed || self.asleep || self.confused
     }
 
-    pub(crate) fn has_tool_attached(&self) -> bool {
+    pub fn has_tool_attached(&self) -> bool {
         self.attached_tool.is_some()
     }
 

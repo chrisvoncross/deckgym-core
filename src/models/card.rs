@@ -157,7 +157,7 @@ impl Card {
         }
     }
 
-    pub(crate) fn get_attacks(&self) -> Vec<Attack> {
+    pub fn get_attacks(&self) -> Vec<Attack> {
         match self {
             Card::Pokemon(pokemon_card) => pokemon_card.attacks.clone(),
             _ => vec![],
@@ -171,7 +171,7 @@ impl Card {
         }
     }
 
-    pub(crate) fn is_ex(&self) -> bool {
+    pub fn is_ex(&self) -> bool {
         // A pokemon is EX if after splitting by spaces in the name, the last word is "EX"
         match self {
             Card::Pokemon(pokemon_card) => {
@@ -200,7 +200,7 @@ impl Card {
         }
     }
 
-    pub(crate) fn get_ability(&self) -> Option<Ability> {
+    pub fn get_ability(&self) -> Option<Ability> {
         match self {
             Card::Pokemon(pokemon_card) => pokemon_card.ability.clone(),
             _ => None,
