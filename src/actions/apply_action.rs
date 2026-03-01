@@ -9,9 +9,12 @@ use crate::{
         abilities::AbilityMechanic,
         apply_abilities_action::forecast_ability,
         apply_action_helpers::{wrap_with_common_logic, Mutation},
+        shared_mutations::pokemon_search_outcomes,
     },
+    effects::TurnEffect,
     hooks::{get_retreat_cost, on_evolve, to_playable_card},
     models::{Card, EnergyType},
+    stadiums::is_mesagoza_active,
     state::State,
     tools,
 };
@@ -51,6 +54,7 @@ pub fn forecast_action(state: &State, action: &Action) -> (Probabilities, Mutati
         | SimpleAction::Activate { .. }
         | SimpleAction::Retreat(_)
         | SimpleAction::ApplyDamage { .. }
+        | SimpleAction::ScheduleDelayedSpotDamage { .. }
         | SimpleAction::Heal { .. }
         | SimpleAction::HealAndDiscardEnergy { .. }
         | SimpleAction::MoveAllDamage { .. }
@@ -83,6 +87,7 @@ pub fn forecast_action(state: &State, action: &Action) -> (Probabilities, Mutati
             in_play_idx,
             num_random_energies,
         } => forecast_attach_from_discard(state, action.actor, *in_play_idx, *num_random_energies),
+        SimpleAction::UseStadium => forecast_use_stadium(state, action.actor),
         // acting_player is not passed here, because there is only 1 turn to end. The current turn.
         SimpleAction::EndTurn => forecast_end_turn(state),
     };
@@ -147,6 +152,17 @@ fn apply_deterministic_action(state: &mut State, action: &Action) {
             targets,
             is_from_active_attack,
         } => handle_damage(state, *attacking_ref, targets, *is_from_active_attack, None),
+        SimpleAction::ScheduleDelayedSpotDamage {
+            target_player,
+            target_in_play_idx,
+            amount,
+        } => apply_schedule_delayed_spot_damage(
+            state,
+            action.actor,
+            *target_player,
+            *target_in_play_idx,
+            *amount,
+        ),
         // Trainer-Specific Actions
         SimpleAction::Heal {
             in_play_idx,
@@ -304,6 +320,24 @@ fn apply_healing(
     if cure_status {
         pokemon.cure_status_conditions();
     }
+}
+
+fn apply_schedule_delayed_spot_damage(
+    state: &mut State,
+    source_player: usize,
+    target_player: usize,
+    target_in_play_idx: usize,
+    amount: u32,
+) {
+    state.add_turn_effect(
+        TurnEffect::DelayedSpotDamage {
+            source_player,
+            target_player,
+            target_in_play_idx,
+            amount,
+        },
+        1,
+    );
 }
 
 fn apply_heal_and_discard_energy(
@@ -641,6 +675,47 @@ fn apply_heal_all_eevee_evolutions(acting_player: usize, state: &mut State) {
             pokemon.heal(20);
         }
     }
+}
+
+/// Forecasts the UseStadium action for activated stadiums like Mesagoza.
+fn forecast_use_stadium(state: &State, acting_player: usize) -> (Probabilities, Mutations) {
+    // Currently only Mesagoza has an activated effect
+    if is_mesagoza_active(state) {
+        return forecast_mesagoza_effect(state, acting_player);
+    }
+    // No other activated stadiums for now, just mark as used
+    (vec![1.0], vec![Box::new(|_, _, _| {})])
+}
+
+/// Mesagoza: Once during each player's turn, that player may flip a coin.
+/// If heads, that player puts a random Pokémon from their deck into their hand.
+fn forecast_mesagoza_effect(state: &State, acting_player: usize) -> (Probabilities, Mutations) {
+    // Get the search outcomes for any Pokemon (reusing existing logic)
+    let (search_probs, search_mutations) = pokemon_search_outcomes(acting_player, state, false);
+
+    // Wrap each search outcome with "mark stadium as used" and scale by 50% for heads
+    let num_search_outcomes = search_probs.len();
+    let mut probabilities = Vec::with_capacity(num_search_outcomes + 1);
+    let mut outcomes: Mutations = Vec::with_capacity(num_search_outcomes + 1);
+
+    // Heads outcomes: 50% total, distributed among all possible Pokemon draws
+    for (prob, mutation) in search_probs.into_iter().zip(search_mutations.into_iter()) {
+        probabilities.push(0.5 * prob);
+        outcomes.push(Box::new(move |rng, state, action| {
+            state.has_used_stadium[action.actor] = true;
+            mutation(rng, state, action);
+            debug!("Mesagoza: Flipped heads, searched for Pokemon");
+        }));
+    }
+
+    // Tails outcome: 50% - nothing happens
+    probabilities.push(0.5);
+    outcomes.push(Box::new(move |_, state, action| {
+        state.has_used_stadium[action.actor] = true;
+        debug!("Mesagoza: Flipped tails, nothing happens");
+    }));
+
+    (probabilities, outcomes)
 }
 
 // Test that when evolving a damanged pokemon, damage stays.

@@ -49,6 +49,7 @@ fn get_weight(action: &SimpleAction) -> u32 {
         SimpleAction::UseAbility { .. } => 10,
         SimpleAction::Attack(_) => 10,
         SimpleAction::ApplyDamage { .. } => 10,
+        SimpleAction::ScheduleDelayedSpotDamage { .. } => 10,
         SimpleAction::Retreat(_) => 2,
         SimpleAction::EndTurn => 1,
         SimpleAction::Heal { .. } => 5,
@@ -65,6 +66,7 @@ fn get_weight(action: &SimpleAction) -> u32 {
         SimpleAction::HealAllEeveeEvolutions => 5,
         SimpleAction::DiscardFossil { .. } => 1, // Low weight to discard fossils
         SimpleAction::ReturnPokemonToHand { .. } => 5,
-        SimpleAction::Noop => 0, // No operation has no weight
+        SimpleAction::UseStadium => 5, // Stadium abilities like Mesagoza
+        SimpleAction::Noop => 0,       // No operation has no weight
     }
 }

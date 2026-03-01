@@ -33,13 +33,11 @@ pub struct State {
     // Player that needs to select from playable actions. Might not be aligned
     // with coin toss and the parity, see Sabrina.
     pub current_player: usize,
-    /// Which player went first (set by coin flip in initialize()).
-    pub starting_player: usize,
     pub(crate) end_turn_pending: bool,
     pub move_generation_stack: Vec<(usize, Vec<SimpleAction>)>,
 
     // Core state
-    pub current_energy: Option<EnergyType>,
+    pub(crate) current_energy: Option<EnergyType>,
     pub hands: [Vec<Card>; 2],
     pub decks: [Deck; 2],
     pub discard_piles: [Vec<Card>; 2],
@@ -50,8 +48,9 @@ pub struct State {
     pub active_stadium: Option<Card>,
 
     // Turn Flags (remember to reset these in reset_turn_states)
-    pub has_played_support: bool,
+    pub(crate) has_played_support: bool,
     pub(crate) has_retreated: bool,
+    pub has_used_stadium: [bool; 2], // Tracks if each player has used the stadium this turn
     pub(crate) knocked_out_by_opponent_attack_this_turn: bool,
     pub(crate) knocked_out_by_opponent_attack_last_turn: bool,
     // Maps turn to a vector of effects (cards) for that turn. Using BTreeMap to keep State hashable.
@@ -65,7 +64,6 @@ impl State {
             points: [0, 0],
             turn_count: 0,
             current_player: 0,
-            starting_player: 0,
             end_turn_pending: false,
             move_generation_stack: Vec::new(),
             current_energy: None,
@@ -77,6 +75,7 @@ impl State {
             active_stadium: None,
             has_played_support: false,
             has_retreated: false,
+            has_used_stadium: [false, false],
 
             knocked_out_by_opponent_attack_this_turn: false,
             knocked_out_by_opponent_attack_last_turn: false,
@@ -133,7 +132,6 @@ impl State {
         }
         // Flip a coin to determine the starting player
         state.current_player = rng.gen_range(0..2);
-        state.starting_player = state.current_player;
 
         state
     }
@@ -246,6 +244,7 @@ impl State {
 
         self.has_played_support = false;
         self.has_retreated = false;
+        self.has_used_stadium[self.current_player] = false;
     }
 
     /// Adds an effect card that will remain active for a specified number of turns.
@@ -337,7 +336,7 @@ impl State {
         self.generate_energy();
     }
 
-    pub fn is_game_over(&self) -> bool {
+    pub(crate) fn is_game_over(&self) -> bool {
         self.winner.is_some() || self.turn_count >= 100
     }
 

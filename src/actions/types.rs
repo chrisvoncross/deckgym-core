@@ -73,6 +73,11 @@ pub enum SimpleAction {
         targets: Vec<(u32, usize, usize)>, // Vec of (damage, target_player, in_play_idx)
         is_from_active_attack: bool,
     },
+    ScheduleDelayedSpotDamage {
+        target_player: usize,
+        target_in_play_idx: usize,
+        amount: u32,
+    },
     /// Switch the in_play_idx pokemon with the active pokemon.
     Activate {
         player: usize,
@@ -112,6 +117,8 @@ pub enum SimpleAction {
     DiscardFossil {
         in_play_idx: usize,
     },
+    /// Use an activated stadium effect (once per turn per player)
+    UseStadium,
     /// Return a Pokemon in play to your hand (e.g., Ilima).
     ReturnPokemonToHand {
         in_play_idx: usize,
@@ -203,6 +210,14 @@ impl fmt::Display for SimpleAction {
                     attacking_ref, targets_str, is_from_active_attack
                 )
             }
+            SimpleAction::ScheduleDelayedSpotDamage {
+                target_player,
+                target_in_play_idx,
+                amount,
+            } => write!(
+                f,
+                "ScheduleDelayedSpotDamage(target:{target_player}:{target_in_play_idx}, amount:{amount})"
+            ),
             SimpleAction::Activate {
                 player,
                 in_play_idx,
@@ -240,6 +255,7 @@ impl fmt::Display for SimpleAction {
             SimpleAction::ReturnPokemonToHand { in_play_idx } => {
                 write!(f, "ReturnPokemonToHand({in_play_idx})")
             }
+            SimpleAction::UseStadium => write!(f, "UseStadium"),
             SimpleAction::Noop => write!(f, "Noop"),
         }
     }

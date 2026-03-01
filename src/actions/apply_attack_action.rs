@@ -29,8 +29,8 @@ use super::{
         active_damage_mutation, build_status_effect, damage_effect_doutcome,
     },
     shared_mutations::{
-        pokemon_search_outcomes, pokemon_search_outcomes_by_type, search_and_bench_by_name,
-        supporter_search_outcomes,
+        pokemon_search_outcomes, pokemon_search_outcomes_by_type, search_and_bench_basic,
+        search_and_bench_by_name, supporter_search_outcomes,
     },
     SimpleAction,
 };
@@ -366,6 +366,7 @@ fn forecast_effect_attack_by_mechanic(
             supporter_search_outcomes(state.current_player, state)
         }
         Mechanic::SearchToBenchByName { name } => search_and_bench_by_name(state, name.clone()),
+        Mechanic::SearchToBenchBasic => search_and_bench_basic(state),
         Mechanic::InflictStatusConditions {
             conditions,
             target_opponent,
@@ -415,6 +416,17 @@ fn forecast_effect_attack_by_mechanic(
             required_extra_energy,
             extra_damage,
         } => extra_energy_attack(state, attack, required_extra_energy.clone(), *extra_damage),
+        Mechanic::ExtraDamageIfTypeEnergyInPlay {
+            energy_type,
+            minimum_count,
+            extra_damage,
+        } => extra_damage_if_type_energy_in_play_attack(
+            state,
+            attack.fixed_damage,
+            *energy_type,
+            *minimum_count,
+            *extra_damage,
+        ),
         Mechanic::ExtraDamageIfBothHeads { extra_damage } => probabilistic_damage_attack(
             vec![0.25, 0.75],
             vec![attack.fixed_damage, attack.fixed_damage + extra_damage],
@@ -515,6 +527,12 @@ fn forecast_effect_attack_by_mechanic(
         Mechanic::DiscardRandomGlobalEnergy { count } => {
             discard_random_global_energy_attack(attack.fixed_damage, *count, state)
         }
+        Mechanic::RandomDamageToOpponentPokemonPerSelfEnergy {
+            energy_type,
+            damage_per_hit,
+        } => {
+            random_damage_to_opponent_pokemon_per_self_energy(state, *energy_type, *damage_per_hit)
+        }
         Mechanic::ExtraDamageIfKnockedOutLastTurn { extra_damage } => {
             extra_damage_if_knocked_out_last_turn_attack(state, attack.fixed_damage, *extra_damage)
         }
@@ -586,6 +604,7 @@ fn forecast_effect_attack_by_mechanic(
         Mechanic::CoinFlipToBlockAttackNextTurn => {
             coin_flip_to_block_attack_next_turn(attack.fixed_damage)
         }
+        Mechanic::DelayedSpotDamage { amount } => delayed_spot_damage(*amount),
     }
 }
 
@@ -1149,6 +1168,24 @@ fn direct_damage(damage: u32, bench_only: bool) -> (Probabilities, Mutations) {
         }
         if choices.is_empty() {
             return; // do nothing, since we use common_attack_mutation, turn should end, and no damage applied.
+        }
+        state.move_generation_stack.push((action.actor, choices));
+    })
+}
+
+fn delayed_spot_damage(damage: u32) -> (Probabilities, Mutations) {
+    active_damage_effect_doutcome(0, move |_, state, action| {
+        let opponent = (action.actor + 1) % 2;
+        let mut choices = Vec::new();
+        for (in_play_idx, _) in state.enumerate_in_play_pokemon(opponent) {
+            choices.push(SimpleAction::ScheduleDelayedSpotDamage {
+                target_player: opponent,
+                target_in_play_idx: in_play_idx,
+                amount: damage,
+            });
+        }
+        if choices.is_empty() {
+            return;
         }
         state.move_generation_stack.push((action.actor, choices));
     })
@@ -1722,6 +1759,31 @@ fn extra_damage_per_specific_energy(
     active_damage_doutcome(damage)
 }
 
+fn extra_damage_if_type_energy_in_play_attack(
+    state: &State,
+    base_damage: u32,
+    energy_type: EnergyType,
+    minimum_count: usize,
+    extra_damage: u32,
+) -> (Probabilities, Mutations) {
+    let total_in_play_type_energy: usize = state
+        .enumerate_in_play_pokemon(state.current_player)
+        .map(|(_, pokemon)| {
+            pokemon
+                .attached_energy
+                .iter()
+                .filter(|energy| **energy == energy_type)
+                .count()
+        })
+        .sum();
+
+    if total_in_play_type_energy >= minimum_count {
+        active_damage_doutcome(base_damage + extra_damage)
+    } else {
+        active_damage_doutcome(base_damage)
+    }
+}
+
 fn teleport_attack() -> (Probabilities, Mutations) {
     active_damage_effect_doutcome(0, move |_, state, action| {
         let mut choices = Vec::new();
@@ -1983,34 +2045,64 @@ fn mega_ampharos_lightning_lancer() -> (Probabilities, Mutations) {
     // For each time a Pokémon was chosen, also do 20 damage to it.
     doutcome(|rng, state, action| {
         let opponent = (action.actor + 1) % 2;
-        let targets: Vec<(u32, usize, usize)> = generate_random_spread_indices(rng, state, true, 3)
-            .into_iter()
-            .map(|idx| (20, opponent, idx))
-            .chain(std::iter::once((100, opponent, 0))) // Add active Pokémon directly
-            .collect();
+        let targets: Vec<(u32, usize, usize)> =
+            generate_random_spread_indices(rng, state, opponent, true, 3)
+                .into_iter()
+                .map(|idx| (20, opponent, idx))
+                .chain(std::iter::once((100, opponent, 0))) // Add active Pokémon directly
+                .collect();
 
         let attacking_ref = (action.actor, 0);
         handle_damage(state, attacking_ref, &targets, true, None);
     })
 }
 
+fn random_damage_to_opponent_pokemon_per_self_energy(
+    state: &State,
+    energy_type: EnergyType,
+    damage_per_hit: u32,
+) -> (Probabilities, Mutations) {
+    let energy_count = state
+        .get_active(state.current_player)
+        .attached_energy
+        .iter()
+        .filter(|&&e| e == energy_type)
+        .count();
+
+    if energy_count == 0 {
+        return active_damage_doutcome(0);
+    }
+
+    doutcome_from_mutation(Box::new(move |rng, state, action| {
+        let opponent = (action.actor + 1) % 2;
+        let targets: Vec<(u32, usize, usize)> =
+            generate_random_spread_indices(rng, state, opponent, false, energy_count)
+                .into_iter()
+                .map(|idx| (damage_per_hit, opponent, idx))
+                .collect();
+
+        let attacking_ref = (action.actor, 0);
+        handle_damage(state, attacking_ref, &targets, true, None);
+    }))
+}
+
 fn generate_random_spread_indices(
     rng: &mut StdRng,
     state: &State,
+    player: usize,
     bench_only: bool,
     count: usize,
 ) -> Vec<usize> {
-    let opponent = (state.current_player + 1) % 2;
     let mut targets = vec![];
     for _ in 0..count {
         let possible_indices: Vec<usize> = if bench_only {
             state
-                .enumerate_bench_pokemon(opponent)
+                .enumerate_bench_pokemon(player)
                 .map(|(idx, _)| idx)
                 .collect()
         } else {
             state
-                .enumerate_in_play_pokemon(opponent)
+                .enumerate_in_play_pokemon(player)
                 .map(|(idx, _)| idx)
                 .collect()
         };
@@ -2642,5 +2734,53 @@ mod test {
 
         // Verify Oricorio did NOT take damage
         assert_eq!(state.get_active(1).get_remaining_hp(), 70);
+    }
+
+    #[test]
+    fn test_extra_damage_if_type_energy_in_play_attack() {
+        let mut rng = StdRng::seed_from_u64(0);
+        let action = Action {
+            actor: 0,
+            action: SimpleAction::Attack(0),
+            is_stack: false,
+        };
+
+        let attacker = get_card_by_enum(CardId::B2a042BelliboltEx);
+        let bench_lightning = get_card_by_enum(CardId::A2058Shinx);
+        let receiver = get_card_by_enum(CardId::A1003Venusaur); // 160 HP
+
+        let mut below_threshold = State::default();
+        below_threshold.in_play_pokemon[0][0] = Some(to_playable_card(&attacker, false));
+        below_threshold.in_play_pokemon[0][1] = Some(to_playable_card(&bench_lightning, false));
+        below_threshold.in_play_pokemon[1][0] = Some(to_playable_card(&receiver, false));
+        below_threshold.attach_energy_from_zone(0, 0, EnergyType::Lightning, 2, false);
+        below_threshold.attach_energy_from_zone(0, 1, EnergyType::Lightning, 1, false);
+
+        let (_, mut below_mutations) = extra_damage_if_type_energy_in_play_attack(
+            &below_threshold,
+            70,
+            EnergyType::Lightning,
+            4,
+            70,
+        );
+        below_mutations.remove(0)(&mut rng, &mut below_threshold, &action);
+        assert_eq!(below_threshold.get_active(1).get_remaining_hp(), 90);
+
+        let mut at_threshold = State::default();
+        at_threshold.in_play_pokemon[0][0] = Some(to_playable_card(&attacker, false));
+        at_threshold.in_play_pokemon[0][1] = Some(to_playable_card(&bench_lightning, false));
+        at_threshold.in_play_pokemon[1][0] = Some(to_playable_card(&receiver, false));
+        at_threshold.attach_energy_from_zone(0, 0, EnergyType::Lightning, 2, false);
+        at_threshold.attach_energy_from_zone(0, 1, EnergyType::Lightning, 2, false);
+
+        let (_, mut threshold_mutations) = extra_damage_if_type_energy_in_play_attack(
+            &at_threshold,
+            70,
+            EnergyType::Lightning,
+            4,
+            70,
+        );
+        threshold_mutations.remove(0)(&mut rng, &mut at_threshold, &action);
+        assert_eq!(at_threshold.get_active(1).get_remaining_hp(), 20);
     }
 }
